@@ -306,7 +306,22 @@ def compute_summary(conn, month: str) -> dict:
             }
         )
 
-    return {"month": month, "total": round(total, 2), "categories": categories}
+    pending_row = conn.execute(
+        """
+        SELECT SUM(-amount) AS amount
+        FROM bank_transactions
+        WHERE kind = 'credit_card_charge' AND settlement = 'delayed' AND booking_date LIKE ?
+        """,
+        (f"{month}-%",),
+    ).fetchone()
+    pending_settlement = round(pending_row["amount"] or 0, 2)
+
+    return {
+        "month": month,
+        "total": round(total, 2),
+        "pending_settlement": pending_settlement,
+        "categories": categories,
+    }
 
 
 @app.get("/summary", response_model=SummaryOut)

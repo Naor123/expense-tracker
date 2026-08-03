@@ -390,9 +390,47 @@ textarea {
 }
 
 .summary-total-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 0.8rem;
   color: var(--color-text-muted);
   margin-top: -2px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  font-family: inherit;
+}
+
+.summary-total-label:hover {
+  color: var(--color-text);
+}
+
+.summary-total-label svg {
+  opacity: 0.5;
+}
+
+.summary-total-label-input {
+  font-size: 0.8rem;
+  color: var(--color-text);
+  margin-top: -2px;
+  text-align: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  background: var(--color-surface);
+  font-family: inherit;
+}
+
+.summary-settlement-breakdown {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
 }
 
 .chart-empty {

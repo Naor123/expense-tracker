@@ -49,6 +49,7 @@ class SummaryCategory(BaseModel):
 class SummaryOut(BaseModel):
     month: str
     total: float
+    pending_settlement: float
     categories: list[SummaryCategory]
 
 
