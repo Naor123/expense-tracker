@@ -267,6 +267,9 @@ def delete_expense(expense_id: int):
         row = conn.execute("SELECT id FROM expenses WHERE id = ?", (expense_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Expense not found")
+        # recurring_generated / bank_transactions rows may reference this expense
+        # and must survive the delete (same FK relaxation as delete_recurring_bill)
+        conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
         conn.commit()
         return None

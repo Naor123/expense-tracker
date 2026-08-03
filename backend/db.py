@@ -185,22 +185,29 @@ def init_db():
             )
         conn.commit()
 
-        for bill_name, amount, category_name, interval_months, month_parity, start_month in SEED_RECURRING_BILLS:
-            category = conn.execute(
-                "SELECT id FROM categories WHERE name = ?", (category_name,)
-            ).fetchone()
-            if not category:
-                continue
-            conn.execute(
-                """
-                INSERT INTO recurring_bills
-                    (name, amount, category_id, interval_months, month_parity, start_month, active)
-                SELECT ?, ?, ?, ?, ?, ?, 1
-                WHERE NOT EXISTS (SELECT 1 FROM recurring_bills WHERE name = ?)
-                """,
-                (bill_name, amount, category["id"], interval_months, month_parity, start_month, bill_name),
-            )
-        conn.commit()
+        # Seed built-in recurring bills only into a genuinely empty table — never
+        # "top up" a missing name later, since a user deleting a built-in bill
+        # (Settings intentionally leaves its already-generated expenses in place)
+        # would otherwise get it silently recreated on the next server restart,
+        # generating a second, duplicate stream of monthly expenses alongside
+        # the orphaned ones from the deleted original.
+        has_any_bill = conn.execute("SELECT 1 FROM recurring_bills LIMIT 1").fetchone()
+        if not has_any_bill:
+            for bill_name, amount, category_name, interval_months, month_parity, start_month in SEED_RECURRING_BILLS:
+                category = conn.execute(
+                    "SELECT id FROM categories WHERE name = ?", (category_name,)
+                ).fetchone()
+                if not category:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO recurring_bills
+                        (name, amount, category_id, interval_months, month_parity, start_month, active)
+                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (bill_name, amount, category["id"], interval_months, month_parity, start_month),
+                )
+            conn.commit()
     finally:
         conn.close()
 
