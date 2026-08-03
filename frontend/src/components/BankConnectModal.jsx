@@ -6,14 +6,18 @@ function formatDateTime(iso) {
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
-function thirtyDaysAgo() {
+function monthStart() {
   const d = new Date()
-  d.setDate(d.getDate() - 30)
-  return d.toISOString().slice(0, 10)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`
 }
 
 function today() {
   return new Date().toISOString().slice(0, 10)
+}
+
+const SCRAPER_COMPANIES = {
+  hapoalim: { label: 'Bank Hapoalim', credentialLabel: 'ID number', connectionLabel: 'Hapoalim (Bank)' },
+  max: { label: 'Max Credit Card', credentialLabel: 'Username', connectionLabel: 'Max (Credit Card)' },
 }
 
 export default function BankConnectModal({
@@ -27,6 +31,7 @@ export default function BankConnectModal({
   onSubmitReverifyOtp,
 }) {
   const [provider, setProvider] = useState('psd2')
+  const [companyId, setCompanyId] = useState('hapoalim')
   const [label, setLabel] = useState('')
   const [userCode, setUserCode] = useState('')
   const [password, setPassword] = useState('')
@@ -66,6 +71,7 @@ export default function BankConnectModal({
       } else {
         const payload = { provider, label: label.trim() }
         if (provider === 'scraper') {
+          payload.company_id = companyId
           payload.user_code = userCode
           payload.password = password
         }
@@ -102,7 +108,7 @@ export default function BankConnectModal({
     setSyncingId(connection.id)
     setError('')
     try {
-      await onSync(connection.id, thirtyDaysAgo(), today())
+      await onSync(connection.id, monthStart(), today())
     } catch (err) {
       setError(err.response?.data?.detail || 'Sync failed.')
     } finally {
@@ -184,8 +190,10 @@ export default function BankConnectModal({
                       <span className={`bank-status-badge bank-status-${c.status}`}>{c.status}</span>
                     </div>
                     <div className="recurring-bill-schedule">
-                      {c.provider === 'psd2' ? 'Open Banking (PSD2)' : 'Bank scraper'} · Last synced:{' '}
-                      {formatDateTime(c.last_synced_at)}
+                      {c.provider === 'psd2'
+                        ? 'Open Banking (PSD2)'
+                        : SCRAPER_COMPANIES[c.company_id]?.connectionLabel || 'Bank scraper'}{' '}
+                      · Last synced: {formatDateTime(c.last_synced_at)}
                     </div>
                     {c.last_error && <div className="category-manager-error">{c.last_error}</div>}
                   </div>
@@ -233,8 +241,8 @@ export default function BankConnectModal({
                 {reverifyOtp?.connectionId === c.id && (
                   <form className="recurring-bill-confirm" onSubmit={handleReverifyOtpSubmit}>
                     <p>
-                      Hapoalim sent a one-time code to reconnect "{c.label}". A Chrome window has
-                      also opened showing the bank's own page —{' '}
+                      A one-time code was sent to reconnect "{c.label}". A Chrome window has
+                      also opened showing the institution's own page —{' '}
                       <strong>don't type the code there</strong>, enter it here instead.
                     </p>
                     <div className="form-field">
@@ -281,8 +289,8 @@ export default function BankConnectModal({
             {otpSessionId ? (
               <>
                 <p className="category-manager-error" style={{ color: 'var(--color-text-muted)' }}>
-                  Hapoalim sent a one-time code to verify "{label}". A Chrome window has also opened
-                  showing the bank's own page — <strong>don't type the code there</strong>, enter it
+                  A one-time code was sent to verify "{label}". A Chrome window has also opened
+                  showing the institution's own page — <strong>don't type the code there</strong>, enter it
                   here instead and this app will submit it for you.
                 </p>
                 <div className="form-field">
@@ -350,9 +358,26 @@ export default function BankConnectModal({
                 )}
 
                 {provider === 'scraper' && (
+                  <div className="form-field">
+                    <label htmlFor="bank-company">Institution</label>
+                    <select
+                      id="bank-company"
+                      value={companyId}
+                      onChange={(e) => setCompanyId(e.target.value)}
+                    >
+                      {Object.entries(SCRAPER_COMPANIES).map(([id, c]) => (
+                        <option key={id} value={id}>
+                          {c.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {provider === 'scraper' && (
                   <div className="form-row">
                     <div className="form-field">
-                      <label htmlFor="bank-usercode">ID number</label>
+                      <label htmlFor="bank-usercode">{SCRAPER_COMPANIES[companyId].credentialLabel}</label>
                       <input
                         id="bank-usercode"
                         type="text"

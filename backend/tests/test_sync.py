@@ -60,3 +60,44 @@ def test_different_connections_can_share_external_id(conn, bank_connection):
     store_transactions(conn, bank_connection, [make_txn("tx-shared")])
     result = store_transactions(conn, other_connection, [make_txn("tx-shared")])
     assert result["inserted"] == 1  # unique index is scoped per-connection
+
+
+def make_card_payment_txn(external_id):
+    return NormalizedTxn(
+        external_id=external_id,
+        booking_date="2026-07-05",
+        amount=-1200.0,
+        currency="ILS",
+        counterparty="MAX",
+        description="monthly card charge",
+        raw={"transactionId": external_id},
+    )
+
+
+def test_bank_side_card_payment_stays_pending_without_a_card_connection(conn, bank_connection):
+    store_transactions(conn, bank_connection, [make_card_payment_txn("tx-card")], "hapoalim")
+    row = conn.execute("SELECT status, kind FROM bank_transactions WHERE external_id = 'tx-card'").fetchone()
+    assert row["kind"] == "credit_card_payment"
+    assert row["status"] == "pending"
+
+
+def test_bank_side_card_payment_is_ignored_when_a_card_connection_is_active(conn, bank_connection):
+    conn.execute(
+        """
+        INSERT INTO bank_connections (provider, company_id, label, status, created_at)
+        VALUES ('scraper', 'max', 'My Max Card', 'valid', '2026-01-01')
+        """
+    )
+    conn.commit()
+
+    store_transactions(conn, bank_connection, [make_card_payment_txn("tx-card")], "hapoalim")
+    row = conn.execute("SELECT status, kind FROM bank_transactions WHERE external_id = 'tx-card'").fetchone()
+    assert row["kind"] == "credit_card_payment"
+    assert row["status"] == "ignored"
+
+
+def test_credit_card_company_transactions_are_tagged_and_stay_pending(conn, bank_connection):
+    store_transactions(conn, bank_connection, [make_txn("tx-purchase")], "max")
+    row = conn.execute("SELECT status, kind FROM bank_transactions WHERE external_id = 'tx-purchase'").fetchone()
+    assert row["kind"] == "credit_card_charge"
+    assert row["status"] == "pending"

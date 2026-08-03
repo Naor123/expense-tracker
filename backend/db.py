@@ -153,6 +153,16 @@ def init_db():
             )
             conn.commit()
 
+        connection_columns = [row["name"] for row in conn.execute("PRAGMA table_info(bank_connections)").fetchall()]
+        if "company_id" not in connection_columns:
+            conn.execute("ALTER TABLE bank_connections ADD COLUMN company_id TEXT")
+            conn.commit()
+
+        txn_columns = [row["name"] for row in conn.execute("PRAGMA table_info(bank_transactions)").fetchall()]
+        if "kind" not in txn_columns:
+            conn.execute("ALTER TABLE bank_transactions ADD COLUMN kind TEXT NOT NULL DEFAULT 'bank_transfer'")
+            conn.commit()
+
         for name, color in SEED_CATEGORIES:
             conn.execute(
                 """

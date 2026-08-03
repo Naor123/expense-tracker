@@ -88,16 +88,23 @@ class ScraperClient:
     def __init__(self, settings: Optional[BankSettings] = None):
         self.settings = settings or get_bank_settings()
 
-    def start_login(self, credentials: dict, start_date: str, device_trust_data: Optional[dict] = None) -> dict:
+    def start_login(
+        self, credentials: dict, start_date: str, device_trust_data: Optional[dict] = None,
+        company_id: Optional[str] = None,
+    ) -> dict:
         """Begins a login. Returns {status: 'otp_required', session_id} or
         {status: 'success', ...fetch results}."""
         _reap_stale_sessions()
         session = _SidecarSession(self.settings)
-        payload = {"companyId": self.settings.scraper_company_id, "credentials": credentials, "startDate": start_date}
+        payload = {
+            "companyId": company_id or self.settings.scraper_company_id,
+            "credentials": credentials,
+            "startDate": start_date,
+        }
         if device_trust_data:
             payload["deviceTrustData"] = device_trust_data
         data = session.send(payload)
-        return self._handle_response(session, data, credentials)
+        return self._handle_response(session, data, credentials, payload["companyId"])
 
     def submit_otp(self, session_id: str, otp_code: str) -> dict:
         with _sessions_lock:
@@ -105,13 +112,13 @@ class ScraperClient:
         if not entry:
             raise BankAuthError("OTP session has expired — please reconnect")
         data = entry["session"].send(otp_code)
-        return self._handle_response(entry["session"], data, entry["credentials"])
+        return self._handle_response(entry["session"], data, entry["credentials"], entry["company_id"])
 
-    def _handle_response(self, session: _SidecarSession, data: dict, credentials: dict) -> dict:
+    def _handle_response(self, session: _SidecarSession, data: dict, credentials: dict, company_id: str) -> dict:
         if data.get("awaitingOtp"):
             session_id = str(uuid.uuid4())
             with _sessions_lock:
-                _sessions[session_id] = {"session": session, "credentials": credentials}
+                _sessions[session_id] = {"session": session, "credentials": credentials, "company_id": company_id}
             return {"status": "otp_required", "session_id": session_id}
 
         if not data.get("success"):
@@ -131,16 +138,20 @@ class ScraperClient:
         return {
             "status": "success",
             "credentials": credentials,
+            "company_id": company_id,
             "accounts": accounts,
             "transactions_by_account": transactions_by_account,
             "device_trust_data": data.get("deviceTrustData"),
         }
 
-    def sync_login(self, credentials: dict, start_date: str, device_trust_data: Optional[dict] = None) -> dict:
+    def sync_login(
+        self, credentials: dict, start_date: str, device_trust_data: Optional[dict] = None,
+        company_id: Optional[str] = None,
+    ) -> dict:
         """Non-interactive login for routine syncs. Device trust should make OTP
         unnecessary; if the bank asks for it anyway (trust expired), there's no
         user in the loop to answer, so this fails clearly instead of hanging."""
-        result = self.start_login(credentials, start_date, device_trust_data)
+        result = self.start_login(credentials, start_date, device_trust_data, company_id)
         if result["status"] == "otp_required":
             with _sessions_lock:
                 entry = _sessions.pop(result["session_id"], None)

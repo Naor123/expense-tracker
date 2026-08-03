@@ -805,6 +805,24 @@ textarea {
   padding: 2px 6px;
 }
 
+.bank-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+}
+
+.bank-kind-credit_card_charge,
+.bank-kind-credit_card_payment {
+  color: var(--color-primary);
+  background: rgba(79, 70, 229, 0.12);
+}
+
 .header-icon-badge {
   position: relative;
 }

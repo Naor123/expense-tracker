@@ -1,13 +1,14 @@
 import json
 import os
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from bank import crypto
+from bank.companies import SCRAPER_COMPANIES
 from bank.config import get_bank_settings
 from bank.errors import BankAuthError, BankConfigError, BankFetchError
 from bank.psd2 import Psd2Client
@@ -516,10 +517,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _month_start() -> str:
+    return date.today().replace(day=1).isoformat()
+
+
 def row_to_bank_connection(row) -> dict:
     return {
         "id": row["id"],
         "provider": row["provider"],
+        "company_id": row["company_id"],
         "label": row["label"],
         "account_ref": row["account_ref"],
         "status": row["status"],
@@ -531,7 +537,7 @@ def row_to_bank_connection(row) -> dict:
 
 BANK_TRANSACTION_JOIN_SELECT = """
     SELECT t.id, t.connection_id, t.external_id, t.booking_date, t.value_date, t.amount,
-           t.currency, t.counterparty, t.description, t.status, t.suggested_category_id,
+           t.currency, t.counterparty, t.description, t.status, t.kind, t.suggested_category_id,
            t.expense_id, c.name AS suggested_category_name
     FROM bank_transactions t
     LEFT JOIN categories c ON c.id = t.suggested_category_id
@@ -558,6 +564,7 @@ def row_to_bank_transaction(conn, row) -> dict:
         "counterparty": row["counterparty"],
         "description": row["description"],
         "status": row["status"],
+        "kind": row["kind"],
         "suggested_category_id": row["suggested_category_id"],
         "suggested_category_name": row["suggested_category_name"],
         "expense_id": row["expense_id"],
@@ -584,7 +591,7 @@ def list_bank_connections():
         conn.close()
 
 
-def _create_scraper_connection(conn, label: str, credentials: dict, scraped: dict) -> dict:
+def _create_scraper_connection(conn, label: str, company_id: str, credentials: dict, scraped: dict) -> dict:
     if not scraped["accounts"]:
         raise HTTPException(status_code=502, detail="No accounts returned by scraper")
 
@@ -595,16 +602,16 @@ def _create_scraper_connection(conn, label: str, credentials: dict, scraped: dic
     cur = conn.execute(
         """
         INSERT INTO bank_connections
-            (provider, label, account_ref, status, secrets_enc, last_synced_at, created_at)
-        VALUES ('scraper', ?, ?, 'valid', ?, ?, ?)
+            (provider, company_id, label, account_ref, status, secrets_enc, last_synced_at, created_at)
+        VALUES ('scraper', ?, ?, ?, 'valid', ?, ?, ?)
         """,
-        (label, account_ref, secrets, _now(), _now()),
+        (company_id, label, account_ref, secrets, _now(), _now()),
     )
     conn.commit()
     connection_id = cur.lastrowid
 
     txns = scraped["transactions_by_account"].get(account_ref, [])
-    store_transactions(conn, connection_id, txns)
+    store_transactions(conn, connection_id, txns, company_id)
 
     row = conn.execute("SELECT * FROM bank_connections WHERE id = ?", (connection_id,)).fetchone()
     return row_to_bank_connection(row)
@@ -632,7 +639,7 @@ def _update_scraper_connection(conn, connection_id: int, scraped: dict) -> dict:
     conn.commit()
 
     txns = scraped["transactions_by_account"].get(account_ref, [])
-    store_transactions(conn, connection_id, txns)
+    store_transactions(conn, connection_id, txns, scraped.get("company_id"))
 
     row = conn.execute("SELECT * FROM bank_connections WHERE id = ?", (connection_id,)).fetchone()
     return row_to_bank_connection(row)
@@ -675,22 +682,27 @@ def bank_connect(payload: BankConnectCreate):
             return result
 
         elif payload.provider == "scraper":
+            company = SCRAPER_COMPANIES.get(payload.company_id)
+            if not company:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"company_id must be one of {sorted(SCRAPER_COMPANIES)}",
+                )
             if not payload.user_code or not payload.password:
                 raise HTTPException(
                     status_code=422,
                     detail="user_code and password are required for the scraper provider",
                 )
-            credentials = {"userCode": payload.user_code, "password": payload.password}
-            start_date = (date.today() - timedelta(days=30)).isoformat()
+            credentials = {company["credential_field"]: payload.user_code, "password": payload.password}
             try:
-                result = ScraperClient().start_login(credentials, start_date)
+                result = ScraperClient().start_login(credentials, _month_start(), company_id=payload.company_id)
             except BankAuthError as e:
                 raise HTTPException(status_code=401, detail=str(e))
 
             if result["status"] == "otp_required":
                 return {"status": "otp_required", "session_id": result["session_id"]}
 
-            return _create_scraper_connection(conn, payload.label, credentials, result)
+            return _create_scraper_connection(conn, payload.label, payload.company_id, credentials, result)
 
         else:
             raise HTTPException(status_code=422, detail="provider must be 'psd2' or 'scraper'")
@@ -710,7 +722,7 @@ def bank_connect_otp(payload: BankConnectOtpSubmit):
         if result["status"] == "otp_required":
             return {"status": "otp_required", "session_id": result["session_id"]}
 
-        return _create_scraper_connection(conn, payload.label, result["credentials"], result)
+        return _create_scraper_connection(conn, payload.label, result["company_id"], result["credentials"], result)
     finally:
         conn.close()
 
@@ -811,9 +823,8 @@ def reverify_bank_connection(connection_id: int):
         if not credentials:
             raise HTTPException(status_code=422, detail="No stored credentials for this connection")
 
-        start_date = (date.today() - timedelta(days=30)).isoformat()
         try:
-            result = ScraperClient().start_login(credentials, start_date)
+            result = ScraperClient().start_login(credentials, _month_start(), company_id=row["company_id"])
         except BankAuthError as e:
             raise HTTPException(status_code=401, detail=str(e))
 

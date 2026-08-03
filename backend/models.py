@@ -100,6 +100,7 @@ class BankConnectCreate(BaseModel):
     provider: str  # 'psd2' | 'scraper'
     label: str
     # scraper only:
+    company_id: Optional[str] = None  # 'hapoalim' | 'max'
     user_code: Optional[str] = None
     password: Optional[str] = None
 
@@ -107,6 +108,7 @@ class BankConnectCreate(BaseModel):
 class BankConnectionOut(BaseModel):
     id: int
     provider: str
+    company_id: Optional[str] = None
     label: str
     account_ref: Optional[str] = None
     status: str
@@ -144,6 +146,7 @@ class BankTransactionOut(BaseModel):
     counterparty: Optional[str] = None
     description: Optional[str] = None
     status: str
+    kind: str
     suggested_category_id: Optional[int] = None
     suggested_category_name: Optional[str] = None
     expense_id: Optional[int] = None

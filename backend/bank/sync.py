@@ -1,8 +1,9 @@
 import json
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 from bank import crypto
+from bank.classify import CREDIT_CARD_COMPANY_IDS, classify_transaction
 from bank.errors import BankAuthError, BankConfigError, BankFetchError
 from bank.psd2 import Psd2Client
 from bank.rules import suggest_category
@@ -33,6 +34,7 @@ def _fetch_scraper(conn, connection, date_from: str) -> List[NormalizedTxn]:
         credentials=secrets["credentials"],
         start_date=date_from,
         device_trust_data=secrets.get("device_trust_data"),
+        company_id=connection["company_id"],
     )
 
     if result.get("device_trust_data"):
@@ -60,24 +62,45 @@ def _fetch_scraper(conn, connection, date_from: str) -> List[NormalizedTxn]:
     return []
 
 
-def store_transactions(conn, connection_id: int, txns: List[NormalizedTxn]) -> dict:
+def _has_active_credit_card_connection(conn, exclude_connection_id: int) -> bool:
+    placeholders = ",".join("?" * len(CREDIT_CARD_COMPANY_IDS))
+    row = conn.execute(
+        f"""
+        SELECT 1 FROM bank_connections
+        WHERE status = 'valid' AND id != ? AND company_id IN ({placeholders})
+        LIMIT 1
+        """,
+        (exclude_connection_id, *CREDIT_CARD_COMPANY_IDS),
+    ).fetchone()
+    return row is not None
+
+
+def store_transactions(conn, connection_id: int, txns: List[NormalizedTxn], company_id: Optional[str] = None) -> dict:
     """Dedupe-insert NormalizedTxns into bank_transactions. Shared by sync_bank_transactions
     and the scraper's connect flow (which already has a batch of txns from its first login)."""
     inserted = 0
     for txn in txns:
-        status = "ignored" if txn.amount > 0 else "pending"
+        kind = classify_transaction(txn.counterparty, txn.description, company_id)
+        if txn.amount > 0:
+            status = "ignored"
+        elif kind == "credit_card_payment" and _has_active_credit_card_connection(conn, connection_id):
+            # Same spending as the itemized credit_card_charge rows from the card
+            # connection — counting both would double it.
+            status = "ignored"
+        else:
+            status = "pending"
         category_id = suggest_category(conn, txn)
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO bank_transactions
                 (connection_id, external_id, booking_date, value_date, amount, currency,
-                 counterparty, description, raw_json, status, suggested_category_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 counterparty, description, raw_json, status, kind, suggested_category_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 connection_id, txn.external_id, txn.booking_date, txn.value_date, txn.amount,
                 txn.currency, txn.counterparty, txn.description, json.dumps(txn.raw),
-                status, category_id, _now(),
+                status, kind, category_id, _now(),
             ),
         )
         if cur.rowcount:
@@ -108,7 +131,7 @@ def sync_bank_transactions(conn, connection_id: int, date_from: str, date_to: st
         conn.commit()
         raise
 
-    result = store_transactions(conn, connection_id, txns)
+    result = store_transactions(conn, connection_id, txns, connection["company_id"])
 
     conn.execute(
         "UPDATE bank_connections SET status = 'valid', last_synced_at = ?, last_error = NULL WHERE id = ?",

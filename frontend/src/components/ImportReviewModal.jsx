@@ -1,9 +1,15 @@
 import { useState } from 'react'
-import { X, Check, XCircle, AlertTriangle } from 'lucide-react'
+import { X, Check, XCircle, AlertTriangle, Landmark, CreditCard } from 'lucide-react'
 
 function formatDate(dateStr) {
   const d = new Date(dateStr + 'T00:00:00')
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+const KIND_INFO = {
+  bank_transfer: { label: 'Bank Transfer', Icon: Landmark },
+  credit_card_charge: { label: 'Card Purchase', Icon: CreditCard },
+  credit_card_payment: { label: 'Card Payment', Icon: CreditCard },
 }
 
 export default function ImportReviewModal({ transactions, categories, onClose, onApprove, onIgnore, onBulkApprove }) {
@@ -99,6 +105,16 @@ export default function ImportReviewModal({ transactions, categories, onClose, o
                     <div className="recurring-bill-top">
                       <span className="recurring-bill-name">{txn.counterparty || 'Unknown'}</span>
                       <span className="recurring-bill-amount">₪{Math.abs(txn.amount).toFixed(2)}</span>
+                      {(() => {
+                        const info = KIND_INFO[txn.kind]
+                        if (!info) return null
+                        const { label, Icon } = info
+                        return (
+                          <span className={`bank-kind-badge bank-kind-${txn.kind}`}>
+                            <Icon size={12} /> {label}
+                          </span>
+                        )
+                      })()}
                       {txn.possible_duplicate && (
                         <span className="bank-duplicate-badge" title="Matches an active recurring bill amount">
                           <AlertTriangle size={12} /> possible duplicate
