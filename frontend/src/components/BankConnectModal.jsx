@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { X, Plus, Trash2, RefreshCw, ExternalLink } from 'lucide-react'
+import { X, Plus, Trash2, RefreshCw, ExternalLink, KeyRound } from 'lucide-react'
 
 function formatDateTime(iso) {
   if (!iso) return 'Never'
@@ -16,7 +16,16 @@ function today() {
   return new Date().toISOString().slice(0, 10)
 }
 
-export default function BankConnectModal({ connections, onClose, onConnect, onSubmitOtp, onDelete, onSync }) {
+export default function BankConnectModal({
+  connections,
+  onClose,
+  onConnect,
+  onSubmitOtp,
+  onDelete,
+  onSync,
+  onReverify,
+  onSubmitReverifyOtp,
+}) {
   const [provider, setProvider] = useState('psd2')
   const [label, setLabel] = useState('')
   const [userCode, setUserCode] = useState('')
@@ -27,6 +36,11 @@ export default function BankConnectModal({ connections, onClose, onConnect, onSu
   const [error, setError] = useState('')
   const [syncingId, setSyncingId] = useState(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
+
+  const [reverifyingId, setReverifyingId] = useState(null)
+  const [reverifyOtp, setReverifyOtp] = useState(null) // { connectionId, sessionId, code }
+  const [reverifyError, setReverifyError] = useState('')
+  const [reverifyErrorId, setReverifyErrorId] = useState(null)
 
   function resetForm() {
     setLabel('')
@@ -105,6 +119,46 @@ export default function BankConnectModal({ connections, onClose, onConnect, onSu
     }
   }
 
+  async function handleReverifyStart(connection) {
+    setReverifyingId(connection.id)
+    setReverifyError('')
+    setReverifyErrorId(null)
+    try {
+      const result = await onReverify(connection.id)
+      if (result.status === 'otp_required') {
+        setReverifyOtp({ connectionId: connection.id, sessionId: result.session_id, code: '' })
+      }
+    } catch (err) {
+      setReverifyError(err.response?.data?.detail || 'Could not reconnect.')
+      setReverifyErrorId(connection.id)
+    } finally {
+      setReverifyingId(null)
+    }
+  }
+
+  async function handleReverifyOtpSubmit(e) {
+    e.preventDefault()
+    const connectionId = reverifyOtp.connectionId
+    setReverifyingId(connectionId)
+    setReverifyError('')
+    setReverifyErrorId(null)
+    try {
+      const result = await onSubmitReverifyOtp(connectionId, reverifyOtp.sessionId, reverifyOtp.code)
+      if (result.status === 'otp_required') {
+        setReverifyOtp({ ...reverifyOtp, sessionId: result.session_id, code: '' })
+        setReverifyError('That code was not accepted. Enter the new code your bank just sent.')
+        setReverifyErrorId(connectionId)
+        return
+      }
+      setReverifyOtp(null)
+    } catch (err) {
+      setReverifyError(err.response?.data?.detail || 'Could not reconnect.')
+      setReverifyErrorId(connectionId)
+    } finally {
+      setReverifyingId(null)
+    }
+  }
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
@@ -135,14 +189,26 @@ export default function BankConnectModal({ connections, onClose, onConnect, onSu
                     </div>
                     {c.last_error && <div className="category-manager-error">{c.last_error}</div>}
                   </div>
-                  <button
-                    className="icon-btn"
-                    onClick={() => handleSync(c)}
-                    disabled={syncingId === c.id || c.status !== 'valid'}
-                    aria-label="Sync now"
-                  >
-                    <RefreshCw size={16} className={syncingId === c.id ? 'spin' : ''} />
-                  </button>
+                  {c.status === 'error' && c.provider === 'scraper' ? (
+                    <button
+                      className="icon-btn"
+                      onClick={() => handleReverifyStart(c)}
+                      disabled={reverifyingId === c.id}
+                      aria-label="Reconnect"
+                      title="Reconnect (device trust expired)"
+                    >
+                      <KeyRound size={16} className={reverifyingId === c.id ? 'spin' : ''} />
+                    </button>
+                  ) : (
+                    <button
+                      className="icon-btn"
+                      onClick={() => handleSync(c)}
+                      disabled={syncingId === c.id || c.status !== 'valid'}
+                      aria-label="Sync now"
+                    >
+                      <RefreshCw size={16} className={syncingId === c.id ? 'spin' : ''} />
+                    </button>
+                  )}
                   <button
                     className="delete-btn"
                     onClick={() => setConfirmDeleteId(c.id)}
@@ -164,6 +230,46 @@ export default function BankConnectModal({ connections, onClose, onConnect, onSu
                     </div>
                   </div>
                 )}
+                {reverifyOtp?.connectionId === c.id && (
+                  <form className="recurring-bill-confirm" onSubmit={handleReverifyOtpSubmit}>
+                    <p>
+                      Hapoalim sent a one-time code to reconnect "{c.label}". A Chrome window has
+                      also opened showing the bank's own page —{' '}
+                      <strong>don't type the code there</strong>, enter it here instead.
+                    </p>
+                    <div className="form-field">
+                      <label htmlFor={`reverify-otp-${c.id}`}>One-time code</label>
+                      <input
+                        id={`reverify-otp-${c.id}`}
+                        type="text"
+                        inputMode="numeric"
+                        value={reverifyOtp.code}
+                        onChange={(e) => setReverifyOtp({ ...reverifyOtp, code: e.target.value })}
+                        autoFocus
+                        required
+                      />
+                    </div>
+                    <div className="add-category-row">
+                      <button type="submit" className="inline-btn primary" disabled={reverifyingId === c.id}>
+                        Confirm Code
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-btn"
+                        onClick={() => {
+                          setReverifyOtp(null)
+                          setReverifyError('')
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    {reverifyError && <div className="error-banner">{reverifyError}</div>}
+                  </form>
+                )}
+                {reverifyErrorId === c.id && reverifyOtp?.connectionId !== c.id && (
+                  <div className="error-banner">{reverifyError}</div>
+                )}
               </div>
             ))}
           </div>
@@ -175,7 +281,9 @@ export default function BankConnectModal({ connections, onClose, onConnect, onSu
             {otpSessionId ? (
               <>
                 <p className="category-manager-error" style={{ color: 'var(--color-text-muted)' }}>
-                  Hapoalim sent a one-time code to verify "{label}". Enter it below.
+                  Hapoalim sent a one-time code to verify "{label}". A Chrome window has also opened
+                  showing the bank's own page — <strong>don't type the code there</strong>, enter it
+                  here instead and this app will submit it for you.
                 </p>
                 <div className="form-field">
                   <label htmlFor="bank-otp">One-time code</label>

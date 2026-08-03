@@ -1,0 +1,38 @@
+diff --git a/src/scrapers/hapoalim.ts b/src/scrapers/hapoalim.ts
+index 232b99c..d3f4609 100644
+--- a/src/scrapers/hapoalim.ts
++++ b/src/scrapers/hapoalim.ts
+@@ -266,6 +266,11 @@ function getPossibleLoginResults(baseUrl: string) {
+     `${baseUrl}/portalserver/HomePage`,
+     `${baseUrl}/ng-portals-bt/rb/he/homepage`,
+     `${baseUrl}/ng-portals/rb/he/homepage`,
++    // Confirmed against a real account: a logged-in session can redirect
++    // straight to the last-viewed page instead of the homepage. Matched as an
++    // exact URL (not a broad portal-wide regex) so this can't accidentally
++    // swallow the OTP overlay, whose URL is unconfirmed.
++    `${baseUrl}/ng-portals/rb/he/current-account/transactions`,
+   ];
+   urls[LoginResults.InvalidPassword] = [
+     `${baseUrl}/AUTHENTICATE/LOGON?flow=AUTHENTICATE&state=LOGON&errorcode=1.6&callme=false`,
+@@ -331,7 +336,20 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
+   async login(credentials: ScraperSpecificCredentials): Promise<ScraperLoginResult> {
+     const result = await super.login(credentials);
+ 
+-    if (result.success || result.errorType !== ScraperErrorTypes.TwoFactorRetrieverMissing) {
++    if (result.success) {
++      // A logged-in session can land on a deep page (e.g. current-account/transactions)
++      // instead of the homepage. fetchData() relies on window.bnhpApp, which the
++      // homepage's bootstrap script sets up — navigate there explicitly so that
++      // assumption holds regardless of where login actually redirected to.
++      const current = await getCurrentUrl(this.page, true);
++      if (!current.includes('/homepage') && !current.includes('/HomePage')) {
++        debug('logged in on a non-homepage page (%s), navigating to homepage', current);
++        await this.navigateTo(`${this.baseUrl}/ng-portals/rb/he/homepage`);
++      }
++      return result;
++    }
++
++    if (result.errorType !== ScraperErrorTypes.TwoFactorRetrieverMissing) {
+       return result;
+     }
+ 

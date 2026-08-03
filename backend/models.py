@@ -122,6 +122,11 @@ class BankConnectOtpSubmit(BaseModel):
     label: str
 
 
+class BankReverifyOtpSubmit(BaseModel):
+    session_id: str
+    otp_code: str
+
+
 class BankSyncOut(BaseModel):
     fetched: int
     inserted: int

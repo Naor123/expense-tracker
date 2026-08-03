@@ -35,6 +35,9 @@ class _SidecarSession:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",  # Node always writes UTF-8; without this, Windows
+            # defaults to the system codepage (cp1252) and Hebrew merchant/memo
+            # text in real transactions breaks decoding.
             bufsize=1,
             cwd=_SIDECAR_DIR,
         )
@@ -112,7 +115,10 @@ class ScraperClient:
             return {"status": "otp_required", "session_id": session_id}
 
         if not data.get("success"):
-            raise BankAuthError(f"scraper login failed: {data.get('errorType')} {data.get('errorMessage')}")
+            url_note = f" (at {data['lastKnownUrl']})" if data.get("lastKnownUrl") else ""
+            raise BankAuthError(
+                f"scraper login failed: {data.get('errorType')} {data.get('errorMessage')}{url_note}"
+            )
 
         accounts = []
         transactions_by_account: dict[str, List[NormalizedTxn]] = {}

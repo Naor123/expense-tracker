@@ -29,6 +29,8 @@ import {
   connectBank,
   submitScraperOtp,
   deleteBankConnection,
+  reverifyBankConnection,
+  submitReverifyOtp,
   syncBank,
   getBankTransactions,
   approveBankTransaction,
@@ -202,6 +204,20 @@ function App() {
     setBankConnections((prev) => prev.filter((c) => c.id !== id))
   }
 
+  async function handleReverifyBank(id) {
+    const result = await reverifyBankConnection(id)
+    if (result.status === 'otp_required') return result
+    setBankConnections((prev) => prev.map((c) => (c.id === id ? result : c)))
+    return result
+  }
+
+  async function handleSubmitReverifyOtp(id, sessionId, otpCode) {
+    const result = await submitReverifyOtp(id, sessionId, otpCode)
+    if (result.status === 'otp_required') return result
+    setBankConnections((prev) => prev.map((c) => (c.id === id ? result : c)))
+    return result
+  }
+
   async function handleSyncBank(connectionId, dateFrom, dateTo) {
     await syncBank(connectionId, dateFrom, dateTo)
     await Promise.all([loadBankConnections(), loadPendingTxns()])
@@ -332,6 +348,8 @@ function App() {
           onSubmitOtp={handleSubmitScraperOtp}
           onDelete={handleDeleteBankConnection}
           onSync={handleSyncBank}
+          onReverify={handleReverifyBank}
+          onSubmitReverifyOtp={handleSubmitReverifyOtp}
         />
       )}
 

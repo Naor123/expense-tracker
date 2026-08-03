@@ -44,6 +44,12 @@ export const submitScraperOtp = (sessionId, otpCode, label) =>
     .post('/bank/connect/otp', { session_id: sessionId, otp_code: otpCode, label })
     .then((r) => r.data)
 export const deleteBankConnection = (id) => api.delete(`/bank/connections/${id}`)
+export const reverifyBankConnection = (id) =>
+  api.post(`/bank/connections/${id}/reverify`).then((r) => r.data)
+export const submitReverifyOtp = (id, sessionId, otpCode) =>
+  api
+    .post(`/bank/connections/${id}/reverify/otp`, { session_id: sessionId, otp_code: otpCode })
+    .then((r) => r.data)
 export const syncBank = (connectionId, dateFrom, dateTo) =>
   api
     .post('/bank/sync', null, { params: { connection_id: connectionId, date_from: dateFrom, date_to: dateTo } })

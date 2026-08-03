@@ -19,6 +19,7 @@ from models import (
     BankConnectCreate,
     BankConnectionOut,
     BankConnectOtpSubmit,
+    BankReverifyOtpSubmit,
     BankSyncOut,
     BankTransactionApprove,
     BankTransactionOut,
@@ -609,6 +610,34 @@ def _create_scraper_connection(conn, label: str, credentials: dict, scraped: dic
     return row_to_bank_connection(row)
 
 
+def _update_scraper_connection(conn, connection_id: int, scraped: dict) -> dict:
+    """Refreshes an existing connection after re-verifying login (e.g. device
+    trust expired and OTP was required again) — same shape as
+    _create_scraper_connection but updates in place instead of inserting."""
+    if not scraped["accounts"]:
+        raise HTTPException(status_code=502, detail="No accounts returned by scraper")
+
+    account_ref = scraped["accounts"][0].account_ref
+    secrets = crypto.encrypt(
+        json.dumps({"credentials": scraped["credentials"], "device_trust_data": scraped.get("device_trust_data")})
+    )
+    conn.execute(
+        """
+        UPDATE bank_connections
+        SET account_ref = ?, status = 'valid', secrets_enc = ?, last_synced_at = ?, last_error = NULL
+        WHERE id = ?
+        """,
+        (account_ref, secrets, _now(), connection_id),
+    )
+    conn.commit()
+
+    txns = scraped["transactions_by_account"].get(account_ref, [])
+    store_transactions(conn, connection_id, txns)
+
+    row = conn.execute("SELECT * FROM bank_connections WHERE id = ?", (connection_id,)).fetchone()
+    return row_to_bank_connection(row)
+
+
 @app.post("/bank/connect", status_code=201)
 def bank_connect(payload: BankConnectCreate):
     conn = get_connection()
@@ -760,6 +789,55 @@ def delete_bank_connection(connection_id: int):
         conn.execute("DELETE FROM bank_connections WHERE id = ?", (connection_id,))
         conn.commit()
         return None
+    finally:
+        conn.close()
+
+
+@app.post("/bank/connections/{connection_id}/reverify")
+def reverify_bank_connection(connection_id: int):
+    """Re-runs login for a scraper connection using its stored credentials —
+    used when device trust has expired and a sync starts asking for OTP again,
+    so reconnecting doesn't require retyping the username/password."""
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM bank_connections WHERE id = ?", (connection_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Bank connection not found")
+        if row["provider"] != "scraper":
+            raise HTTPException(status_code=422, detail="Re-verification only applies to the scraper provider")
+
+        secrets = json.loads(crypto.decrypt(row["secrets_enc"])) if row["secrets_enc"] else {}
+        credentials = secrets.get("credentials")
+        if not credentials:
+            raise HTTPException(status_code=422, detail="No stored credentials for this connection")
+
+        start_date = (date.today() - timedelta(days=30)).isoformat()
+        try:
+            result = ScraperClient().start_login(credentials, start_date)
+        except BankAuthError as e:
+            raise HTTPException(status_code=401, detail=str(e))
+
+        if result["status"] == "otp_required":
+            return {"status": "otp_required", "session_id": result["session_id"]}
+
+        return _update_scraper_connection(conn, connection_id, result)
+    finally:
+        conn.close()
+
+
+@app.post("/bank/connections/{connection_id}/reverify/otp")
+def reverify_bank_connection_otp(connection_id: int, payload: BankReverifyOtpSubmit):
+    conn = get_connection()
+    try:
+        try:
+            result = ScraperClient().submit_otp(payload.session_id, payload.otp_code)
+        except BankAuthError as e:
+            raise HTTPException(status_code=401, detail=str(e))
+
+        if result["status"] == "otp_required":
+            return {"status": "otp_required", "session_id": result["session_id"]}
+
+        return _update_scraper_connection(conn, connection_id, result)
     finally:
         conn.close()
 

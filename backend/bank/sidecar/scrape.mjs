@@ -1,5 +1,6 @@
 import { createScraper } from 'israeli-bank-scrapers';
 import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 const pendingLines = [];
@@ -25,11 +26,23 @@ async function main() {
   const input = JSON.parse(await nextLine());
   const { companyId, credentials, startDate, deviceTrustData } = input;
 
+  let lastKnownUrl = null;
+
   const options = {
     companyId,
     startDate: new Date(startDate),
     combineInstallments: false,
-    showBrowser: false,
+    // Hapoalim's anti-automation checks appear to block headless Chrome outright
+    // (confirmed: headless got a blank page every time; visible succeeded on the
+    // first try) — this pops up a real Chrome window on this machine for every
+    // scraper login/sync, not just for debugging.
+    showBrowser: true,
+    storeFailureScreenShotPath: fileURLToPath(new URL('./failure-screenshot.png', import.meta.url)),
+    preparePage: async (page) => {
+      page.on('framenavigated', (frame) => {
+        if (frame === page.mainFrame()) lastKnownUrl = frame.url();
+      });
+    },
   };
   if (deviceTrustData) {
     options.deviceTrustData = deviceTrustData;
@@ -47,7 +60,7 @@ async function main() {
   });
 
   if (!result.success) {
-    emit({ success: false, errorType: result.errorType, errorMessage: result.errorMessage });
+    emit({ success: false, errorType: result.errorType, errorMessage: result.errorMessage, lastKnownUrl });
     process.exit(1);
   }
 
