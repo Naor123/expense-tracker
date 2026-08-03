@@ -12,6 +12,11 @@ const KIND_INFO = {
   credit_card_payment: { label: 'Card Payment', Icon: CreditCard },
 }
 
+const SOURCE_LABELS = {
+  hapoalim: 'Hapoalim',
+  max: 'Max',
+}
+
 export default function ImportReviewModal({
   transactions,
   categories,
@@ -169,6 +174,8 @@ export default function ImportReviewModal({
                         )}
                       </div>
                       <div className="recurring-bill-schedule">
+                        {SOURCE_LABELS[txn.connection_company_id] || txn.connection_label || 'Unknown source'}
+                        {' · '}
                         {formatDate(txn.booking_date)}
                         {txn.description ? ` · ${txn.description}` : ''}
                       </div>

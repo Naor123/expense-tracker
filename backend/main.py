@@ -416,9 +416,11 @@ def row_to_bank_connection(row) -> dict:
 BANK_TRANSACTION_JOIN_SELECT = """
     SELECT t.id, t.connection_id, t.external_id, t.booking_date, t.value_date, t.amount,
            t.currency, t.counterparty, t.description, t.status, t.kind, t.settlement,
-           t.suggested_category_id, t.expense_id, c.name AS suggested_category_name
+           t.suggested_category_id, t.expense_id, c.name AS suggested_category_name,
+           bc.company_id AS connection_company_id, bc.label AS connection_label
     FROM bank_transactions t
     LEFT JOIN categories c ON c.id = t.suggested_category_id
+    LEFT JOIN bank_connections bc ON bc.id = t.connection_id
 """
 
 
@@ -444,6 +446,8 @@ def row_to_bank_transaction(conn, row) -> dict:
         "suggested_category_name": row["suggested_category_name"],
         "expense_id": row["expense_id"],
         "possible_duplicate": possible_duplicate,
+        "connection_company_id": row["connection_company_id"],
+        "connection_label": row["connection_label"],
     }
 
 

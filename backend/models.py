@@ -123,6 +123,8 @@ class BankTransactionOut(BaseModel):
     suggested_category_name: Optional[str] = None
     expense_id: Optional[int] = None
     possible_duplicate: bool = False
+    connection_company_id: Optional[str] = None
+    connection_label: Optional[str] = None
 
 
 class BankTransactionApprove(BaseModel):
