@@ -1,11 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Settings, Repeat, Mail, Check, Landmark, Inbox } from 'lucide-react'
+import { Settings, Mail, Check, Landmark, Inbox } from 'lucide-react'
 import MonthPicker from './components/MonthPicker'
 import AddExpenseForm from './components/AddExpenseForm'
 import ExpensePieChart from './components/ExpensePieChart'
 import ExpenseList from './components/ExpenseList'
 import CategoryManager from './components/CategoryManager'
-import RecurringBillsManager from './components/RecurringBillsManager'
 import BankConnectModal from './components/BankConnectModal'
 import ImportReviewModal from './components/ImportReviewModal'
 import ThemeToggle from './components/ThemeToggle'
@@ -18,10 +17,6 @@ import {
   createExpense,
   deleteExpense,
   getSummary,
-  getRecurringBills,
-  createRecurringBill,
-  updateRecurringBill,
-  deleteRecurringBill,
   sendInsightsEmail,
   getSalary,
   updateSalary,
@@ -51,8 +46,6 @@ function App() {
   const [expenses, setExpenses] = useState([])
   const [summary, setSummary] = useState(null)
   const [showManager, setShowManager] = useState(false)
-  const [recurringBills, setRecurringBills] = useState([])
-  const [showRecurringManager, setShowRecurringManager] = useState(false)
   const [sendingEmail, setSendingEmail] = useState(false)
   const [emailFeedback, setEmailFeedback] = useState(null)
   const [salary, setSalary] = useState(null)
@@ -78,18 +71,6 @@ function App() {
     getCategories().then((data) => {
       if (active) setCategories(data)
     })
-    return () => {
-      active = false
-    }
-  }, [])
-
-  useEffect(() => {
-    let active = true
-    getRecurringBills()
-      .then((data) => {
-        if (active) setRecurringBills(data)
-      })
-      .catch(() => {})
     return () => {
       active = false
     }
@@ -163,22 +144,6 @@ function App() {
   async function handleDeleteCategory(id) {
     await deleteCategory(id)
     setCategories((prev) => prev.filter((c) => c.id !== id))
-  }
-
-  async function handleCreateRecurringBill(data) {
-    const created = await createRecurringBill(data)
-    setRecurringBills((prev) => [...prev, created])
-    return created
-  }
-
-  async function handleUpdateRecurringBill(id, data) {
-    const updated = await updateRecurringBill(id, data)
-    setRecurringBills((prev) => prev.map((b) => (b.id === id ? updated : b)))
-  }
-
-  async function handleDeleteRecurringBill(id) {
-    await deleteRecurringBill(id)
-    setRecurringBills((prev) => prev.filter((b) => b.id !== id))
   }
 
   async function handleUpdateSalary(amount) {
@@ -277,13 +242,6 @@ function App() {
           <ThemeToggle theme={theme} onToggle={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))} />
           <button
             className="icon-btn"
-            onClick={() => setShowRecurringManager(true)}
-            aria-label="Manage recurring bills"
-          >
-            <Repeat size={18} />
-          </button>
-          <button
-            className="icon-btn"
             onClick={() => setShowBankManager(true)}
             aria-label="Manage bank connections"
           >
@@ -343,17 +301,6 @@ function App() {
         />
       )}
 
-      {showRecurringManager && (
-        <RecurringBillsManager
-          bills={recurringBills}
-          categories={categories}
-          onClose={() => setShowRecurringManager(false)}
-          onCreate={handleCreateRecurringBill}
-          onUpdate={handleUpdateRecurringBill}
-          onDelete={handleDeleteRecurringBill}
-        />
-      )}
-
       {showBankManager && (
         <BankConnectModal
           connections={bankConnections}
@@ -364,6 +311,7 @@ function App() {
           onSync={handleSyncBank}
           onReverify={handleReverifyBank}
           onSubmitReverifyOtp={handleSubmitReverifyOtp}
+          month={month}
         />
       )}
 

@@ -17,16 +17,13 @@ SEED_CATEGORIES = [
     ("Uncategorized", "#9CA3AF"),
 ]
 
-SEED_RECURRING_BILLS = [
-    ("Car Lease", 1450, "Car", 1, None, "2026-06"),
-    ("Rent", 4500, "Bills", 1, None, "2026-06"),
-    ("Arnona", 700, "Bills", 2, "odd", "2026-06"),
-    ("Health Insurance", 130, "Bills", 1, None, "2026-06"),
-    ("Internet (ISP)", 160, "Bills", 1, None, "2026-06"),
-    ("AI Payment", 70, "Bills", 1, None, "2026-06"),
-    ("Apple Music & iCloud", 40, "Entertainment", 1, None, "2026-06"),
-    ("Gym", 150, "Entertainment", 1, None, "2026-06"),
-]
+# Everything except Rent comes from the bank/card sync now. Rent is the one
+# fixed, known amount not otherwise represented cleanly in the imported feed
+# (it shows up on the bank side as a same-day standing order, hence 'immediate'),
+# so it stays a hardcoded monthly generator instead of a user-editable table.
+RENT_AMOUNT = 4500
+RENT_CATEGORY_NAME = "Bills"
+RENT_START_MONTH = "2026-06"
 
 
 def get_connection():
@@ -61,25 +58,9 @@ def init_db():
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS recurring_bills (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                amount REAL NOT NULL,
-                category_id INTEGER NOT NULL REFERENCES categories(id),
-                interval_months INTEGER NOT NULL DEFAULT 1,
-                month_parity TEXT,
-                start_month TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS recurring_generated (
-                recurring_id INTEGER NOT NULL REFERENCES recurring_bills(id),
-                month TEXT NOT NULL,
-                expense_id INTEGER REFERENCES expenses(id),
-                PRIMARY KEY (recurring_id, month)
+            CREATE TABLE IF NOT EXISTS rent_generated (
+                month TEXT PRIMARY KEY,
+                expense_id INTEGER REFERENCES expenses(id)
             )
             """
         )
@@ -150,11 +131,27 @@ def init_db():
         )
         conn.commit()
 
+        # One-time cleanup — the old user-editable recurring bills feature is
+        # gone; Rent is now the only recurring item, tracked via `is_rent`
+        # below and `rent_generated` instead of a bill-id foreign key.
+        # `expenses.recurring_id` must be dropped before `recurring_bills`
+        # itself — it's the other FK pointing at that table (besides
+        # recurring_generated, dropped first here), and DROP TABLE fails
+        # under foreign_keys=ON while any non-null column still references it.
+        conn.execute("DROP TABLE IF EXISTS recurring_generated")
+        conn.commit()
+
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(expenses)").fetchall()]
-        if "recurring_id" not in columns:
-            conn.execute(
-                "ALTER TABLE expenses ADD COLUMN recurring_id INTEGER REFERENCES recurring_bills(id)"
-            )
+        if "recurring_id" in columns:
+            conn.execute("ALTER TABLE expenses DROP COLUMN recurring_id")
+            conn.commit()
+            columns = [row["name"] for row in conn.execute("PRAGMA table_info(expenses)").fetchall()]
+
+        conn.execute("DROP TABLE IF EXISTS recurring_bills")
+        conn.commit()
+
+        if "is_rent" not in columns:
+            conn.execute("ALTER TABLE expenses ADD COLUMN is_rent INTEGER NOT NULL DEFAULT 0")
             conn.commit()
         if "bank_txn_id" not in columns:
             conn.execute(
@@ -184,48 +181,8 @@ def init_db():
                 (name, color, name),
             )
         conn.commit()
-
-        # Seed built-in recurring bills only into a genuinely empty table — never
-        # "top up" a missing name later, since a user deleting a built-in bill
-        # (Settings intentionally leaves its already-generated expenses in place)
-        # would otherwise get it silently recreated on the next server restart,
-        # generating a second, duplicate stream of monthly expenses alongside
-        # the orphaned ones from the deleted original.
-        has_any_bill = conn.execute("SELECT 1 FROM recurring_bills LIMIT 1").fetchone()
-        if not has_any_bill:
-            for bill_name, amount, category_name, interval_months, month_parity, start_month in SEED_RECURRING_BILLS:
-                category = conn.execute(
-                    "SELECT id FROM categories WHERE name = ?", (category_name,)
-                ).fetchone()
-                if not category:
-                    continue
-                conn.execute(
-                    """
-                    INSERT INTO recurring_bills
-                        (name, amount, category_id, interval_months, month_parity, start_month, active)
-                    VALUES (?, ?, ?, ?, ?, ?, 1)
-                    """,
-                    (bill_name, amount, category["id"], interval_months, month_parity, start_month),
-                )
-            conn.commit()
     finally:
         conn.close()
-
-
-def bill_applies_to_month(bill, month: str) -> bool:
-    if month < bill["start_month"]:
-        return False
-    if bill["interval_months"] == 1:
-        return True
-    if bill["interval_months"] == 2:
-        month_num = int(month[5:7])
-        is_odd = month_num % 2 == 1
-        if bill["month_parity"] == "odd":
-            return is_odd
-        if bill["month_parity"] == "even":
-            return not is_odd
-        return False
-    return False
 
 
 def months_between(start_month: str, end_month: str):
@@ -268,30 +225,24 @@ def set_salary_for_month(conn, month: str, amount: float):
     )
 
 
-def sync_recurring_bills(conn):
-    current_month = date.today().strftime("%Y-%m")
-    bills = conn.execute(
-        "SELECT * FROM recurring_bills WHERE active = 1"
-    ).fetchall()
+def sync_rent(conn):
+    category = conn.execute(
+        "SELECT id FROM categories WHERE name = ?", (RENT_CATEGORY_NAME,)
+    ).fetchone()
+    if not category:
+        return
 
-    for bill in bills:
-        if current_month < bill["start_month"]:
+    current_month = date.today().strftime("%Y-%m")
+    for month in months_between(RENT_START_MONTH, current_month):
+        already = conn.execute("SELECT 1 FROM rent_generated WHERE month = ?", (month,)).fetchone()
+        if already:
             continue
-        for month in months_between(bill["start_month"], current_month):
-            if not bill_applies_to_month(bill, month):
-                continue
-            already = conn.execute(
-                "SELECT 1 FROM recurring_generated WHERE recurring_id = ? AND month = ?",
-                (bill["id"], month),
-            ).fetchone()
-            if already:
-                continue
-            cur = conn.execute(
-                "INSERT INTO expenses (amount, category_id, date, note, recurring_id) VALUES (?, ?, ?, ?, ?)",
-                (bill["amount"], bill["category_id"], f"{month}-01", bill["name"], bill["id"]),
-            )
-            conn.execute(
-                "INSERT INTO recurring_generated (recurring_id, month, expense_id) VALUES (?, ?, ?)",
-                (bill["id"], month, cur.lastrowid),
-            )
+        cur = conn.execute(
+            "INSERT INTO expenses (amount, category_id, date, note, is_rent) VALUES (?, ?, ?, 'Rent', 1)",
+            (RENT_AMOUNT, category["id"], f"{month}-01"),
+        )
+        conn.execute(
+            "INSERT INTO rent_generated (month, expense_id) VALUES (?, ?)",
+            (month, cur.lastrowid),
+        )
     conn.commit()

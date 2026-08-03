@@ -1,4 +1,4 @@
-from bank.sync import store_transactions
+from bank.sync import has_matching_cross_connection_charge, store_transactions
 from bank.types import NormalizedTxn
 
 
@@ -120,3 +120,82 @@ def test_credit_card_company_transactions_are_tagged_and_stay_pending(conn, bank
     row = conn.execute("SELECT status, kind FROM bank_transactions WHERE external_id = 'tx-purchase'").fetchone()
     assert row["kind"] == "credit_card_charge"
     assert row["status"] == "pending"
+
+
+def other_connection(conn):
+    cur = conn.execute(
+        """
+        INSERT INTO bank_connections (provider, label, status, created_at)
+        VALUES ('scraper', 'Other Bank', 'valid', '2026-01-01')
+        """
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def insert_txn(conn, connection_id, external_id, kind, settlement, booking_date, value_date, amount):
+    cur = conn.execute(
+        """
+        INSERT INTO bank_transactions
+            (connection_id, external_id, booking_date, value_date, amount, currency,
+             counterparty, description, raw_json, status, kind, settlement, created_at)
+        VALUES (?, ?, ?, ?, ?, 'ILS', 'Test', 'Test', '{}', 'pending', ?, ?, '2026-01-01T00:00:00+00:00')
+        """,
+        (connection_id, external_id, booking_date, value_date, amount, kind, settlement),
+    )
+    conn.commit()
+    return conn.execute("SELECT * FROM bank_transactions WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+
+def test_cross_connection_charge_matches_in_both_directions(conn, bank_connection):
+    other = other_connection(conn)
+    card_row = insert_txn(
+        conn, bank_connection, "tx-card", "credit_card_charge", "immediate",
+        "2026-07-10", "2026-07-12", -100.0,
+    )
+    bank_row = insert_txn(
+        conn, other, "tx-bank", "bank_transfer", "immediate",
+        "2026-07-14", None, -100.0,
+    )
+    assert has_matching_cross_connection_charge(conn, card_row) is True
+    assert has_matching_cross_connection_charge(conn, bank_row) is True
+
+
+def test_cross_connection_charge_amount_mismatch_does_not_match(conn, bank_connection):
+    other = other_connection(conn)
+    card_row = insert_txn(
+        conn, bank_connection, "tx-card", "credit_card_charge", "immediate",
+        "2026-07-10", "2026-07-12", -100.0,
+    )
+    insert_txn(conn, other, "tx-bank", "bank_transfer", "immediate", "2026-07-14", None, -99.0)
+    assert has_matching_cross_connection_charge(conn, card_row) is False
+
+
+def test_cross_connection_charge_dates_too_far_apart_does_not_match(conn, bank_connection):
+    other = other_connection(conn)
+    card_row = insert_txn(
+        conn, bank_connection, "tx-card", "credit_card_charge", "immediate",
+        "2026-07-01", "2026-07-05", -100.0,
+    )
+    insert_txn(conn, other, "tx-bank", "bank_transfer", "immediate", "2026-07-20", None, -100.0)
+    assert has_matching_cross_connection_charge(conn, card_row) is False
+
+
+def test_credit_card_payment_never_matches(conn, bank_connection):
+    other = other_connection(conn)
+    payment_row = insert_txn(
+        conn, bank_connection, "tx-payment", "credit_card_payment", "delayed",
+        "2026-07-10", "2026-07-10", -100.0,
+    )
+    insert_txn(conn, other, "tx-bank", "bank_transfer", "immediate", "2026-07-11", None, -100.0)
+    assert has_matching_cross_connection_charge(conn, payment_row) is False
+
+
+def test_delayed_credit_card_charge_never_matches(conn, bank_connection):
+    other = other_connection(conn)
+    delayed_row = insert_txn(
+        conn, bank_connection, "tx-delayed", "credit_card_charge", "delayed",
+        "2026-07-10", "2026-07-10", -100.0,
+    )
+    insert_txn(conn, other, "tx-bank", "bank_transfer", "immediate", "2026-07-11", None, -100.0)
+    assert has_matching_cross_connection_charge(conn, delayed_row) is False

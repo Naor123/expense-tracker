@@ -77,6 +77,35 @@ def _has_active_credit_card_connection(conn, exclude_connection_id: int) -> bool
     return row is not None
 
 
+def has_matching_cross_connection_charge(conn, row) -> bool:
+    """True if this bank_transactions row has a same-amount, close-date
+    counterpart from a DIFFERENT connection — signals the same purchase was
+    likely imported twice: once itemized via the card connection, once as
+    its own line on the bank feed (only happens for immediate-settling
+    charges; the bulk lump sum is already handled by the name-fragment
+    match in classify_transaction)."""
+    if row["kind"] == "credit_card_charge" and row["settlement"] == "immediate":
+        anchor_date, other_kind, other_date_col = row["value_date"], "bank_transfer", "booking_date"
+    elif row["kind"] == "bank_transfer":
+        anchor_date, other_kind, other_date_col = row["booking_date"], "credit_card_charge", "value_date"
+    else:
+        return False
+    if not anchor_date:
+        return False
+    match = conn.execute(
+        f"""
+        SELECT 1 FROM bank_transactions
+        WHERE connection_id != ? AND kind = ?
+          AND (kind != 'credit_card_charge' OR settlement = 'immediate')
+          AND amount = ? AND {other_date_col} IS NOT NULL
+          AND ABS(julianday({other_date_col}) - julianday(?)) <= 3
+        LIMIT 1
+        """,
+        (row["connection_id"], other_kind, row["amount"], anchor_date),
+    ).fetchone()
+    return match is not None
+
+
 def store_transactions(conn, connection_id: int, txns: List[NormalizedTxn], company_id: Optional[str] = None) -> dict:
     """Dedupe-insert NormalizedTxns into bank_transactions. Shared by sync_bank_transactions
     and the scraper's connect flow (which already has a batch of txns from its first login)."""

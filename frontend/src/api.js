@@ -22,13 +22,6 @@ export const getSummary = (month) =>
 
 export const getMonths = () => api.get('/months').then((r) => r.data)
 
-export const getRecurringBills = () => api.get('/recurring-bills').then((r) => r.data)
-export const createRecurringBill = (data) =>
-  api.post('/recurring-bills', data).then((r) => r.data)
-export const updateRecurringBill = (id, data) =>
-  api.put(`/recurring-bills/${id}`, data).then((r) => r.data)
-export const deleteRecurringBill = (id) => api.delete(`/recurring-bills/${id}`)
-
 export const sendInsightsEmail = (month) =>
   api.post('/insights/send-email', null, { params: { month } }).then((r) => r.data)
 

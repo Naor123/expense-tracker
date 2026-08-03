@@ -6,11 +6,6 @@ function formatDateTime(iso) {
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
-function monthStart() {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`
-}
-
 function today() {
   return new Date().toISOString().slice(0, 10)
 }
@@ -29,6 +24,7 @@ export default function BankConnectModal({
   onSync,
   onReverify,
   onSubmitReverifyOtp,
+  month,
 }) {
   const [provider, setProvider] = useState('psd2')
   const [companyId, setCompanyId] = useState('hapoalim')
@@ -108,7 +104,7 @@ export default function BankConnectModal({
     setSyncingId(connection.id)
     setError('')
     try {
-      await onSync(connection.id, monthStart(), today())
+      await onSync(connection.id, `${month}-01`, today())
     } catch (err) {
       setError(err.response?.data?.detail || 'Sync failed.')
     } finally {

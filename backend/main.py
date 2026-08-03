@@ -13,14 +13,15 @@ from bank.config import get_bank_settings
 from bank.errors import BankAuthError, BankConfigError, BankFetchError
 from bank.psd2 import Psd2Client
 from bank.scraper import ScraperClient
-from bank.sync import store_transactions, sync_bank_transactions
+from bank.sync import has_matching_cross_connection_charge, store_transactions, sync_bank_transactions
 from db import (
-    bill_applies_to_month,
+    RENT_AMOUNT,
+    RENT_START_MONTH,
     get_connection,
     get_salary_for_month,
     init_db,
     set_salary_for_month,
-    sync_recurring_bills,
+    sync_rent,
 )
 from mailer import MailerConfigError, MailerSendError, send_summary_email
 from models import (
@@ -41,9 +42,6 @@ from models import (
     ExpenseCreate,
     ExpenseOut,
     InsightsEmailOut,
-    RecurringBillCreate,
-    RecurringBillOut,
-    RecurringBillUpdate,
     SalaryOut,
     SalaryUpdate,
     SummaryOut,
@@ -67,7 +65,7 @@ def on_startup():
     init_db()
     conn = get_connection()
     try:
-        sync_recurring_bills(conn)
+        sync_rent(conn)
     finally:
         conn.close()
 
@@ -91,39 +89,16 @@ def row_to_expense(row) -> dict:
         "category_color": row["category_color"],
         "date": row["date"],
         "note": row["note"],
-        "recurring_id": row["recurring_id"],
+        "is_rent": bool(row["is_rent"]),
         "bank_txn_id": row["bank_txn_id"],
-    }
-
-
-def row_to_recurring_bill(row) -> dict:
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "amount": row["amount"],
-        "category_id": row["category_id"],
-        "category_name": row["category_name"],
-        "category_color": row["category_color"],
-        "interval_months": row["interval_months"],
-        "month_parity": row["month_parity"],
-        "start_month": row["start_month"],
-        "active": bool(row["active"]),
     }
 
 
 EXPENSE_JOIN_SELECT = """
     SELECT e.id, e.amount, e.category_id, c.name AS category_name,
-           c.color AS category_color, e.date, e.note, e.recurring_id, e.bank_txn_id
+           c.color AS category_color, e.date, e.note, e.is_rent, e.bank_txn_id
     FROM expenses e
     JOIN categories c ON c.id = e.category_id
-"""
-
-RECURRING_BILL_JOIN_SELECT = """
-    SELECT r.id, r.name, r.amount, r.category_id, c.name AS category_name,
-           c.color AS category_color, r.interval_months, r.month_parity,
-           r.start_month, r.active
-    FROM recurring_bills r
-    JOIN categories c ON c.id = r.category_id
 """
 
 
@@ -226,7 +201,7 @@ def list_expenses(month: str | None = None):
     validate_month(month)
     conn = get_connection()
     try:
-        sync_recurring_bills(conn)
+        sync_rent(conn)
         rows = conn.execute(
             EXPENSE_JOIN_SELECT
             + " WHERE e.date LIKE ? ORDER BY e.date DESC, e.id DESC",
@@ -329,7 +304,7 @@ def get_summary(month: str | None = None):
     validate_month(month)
     conn = get_connection()
     try:
-        sync_recurring_bills(conn)
+        sync_rent(conn)
         return compute_summary(conn, month)
     finally:
         conn.close()
@@ -340,7 +315,7 @@ def send_insights_email(month: str | None = None):
     validate_month(month)
     conn = get_connection()
     try:
-        sync_recurring_bills(conn)
+        sync_rent(conn)
         summary = compute_summary(conn, month)
         salary = get_salary_for_month(conn, month)
     finally:
@@ -389,7 +364,7 @@ def set_salary(payload: SalaryUpdate, month: str | None = None):
 def list_months():
     conn = get_connection()
     try:
-        sync_recurring_bills(conn)
+        sync_rent(conn)
         rows = conn.execute(
             """
             SELECT DISTINCT substr(date, 1, 7) AS month
@@ -405,132 +380,6 @@ def list_months():
         conn.close()
 
 
-@app.get("/recurring-bills", response_model=list[RecurringBillOut])
-def list_recurring_bills():
-    conn = get_connection()
-    try:
-        rows = conn.execute(RECURRING_BILL_JOIN_SELECT + " ORDER BY r.id").fetchall()
-        return [row_to_recurring_bill(r) for r in rows]
-    finally:
-        conn.close()
-
-
-@app.post("/recurring-bills", response_model=RecurringBillOut, status_code=201)
-def create_recurring_bill(payload: RecurringBillCreate):
-    conn = get_connection()
-    try:
-        category = conn.execute(
-            "SELECT id FROM categories WHERE id = ?", (payload.category_id,)
-        ).fetchone()
-        if not category:
-            raise HTTPException(status_code=404, detail="Category not found")
-
-        if payload.interval_months == 2 and payload.month_parity not in ("odd", "even"):
-            raise HTTPException(
-                status_code=422,
-                detail="month_parity must be 'odd' or 'even' when interval_months is 2",
-            )
-
-        start_month = payload.start_month or date.today().strftime("%Y-%m")
-        validate_month(start_month)
-
-        cur = conn.execute(
-            """
-            INSERT INTO recurring_bills
-                (name, amount, category_id, interval_months, month_parity, start_month, active)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
-            """,
-            (
-                payload.name,
-                payload.amount,
-                payload.category_id,
-                payload.interval_months,
-                payload.month_parity,
-                start_month,
-            ),
-        )
-        conn.commit()
-        new_id = cur.lastrowid
-
-        sync_recurring_bills(conn)
-
-        row = conn.execute(
-            RECURRING_BILL_JOIN_SELECT + " WHERE r.id = ?", (new_id,)
-        ).fetchone()
-        return row_to_recurring_bill(row)
-    finally:
-        conn.close()
-
-
-@app.put("/recurring-bills/{bill_id}", response_model=RecurringBillOut)
-def update_recurring_bill(bill_id: int, payload: RecurringBillUpdate):
-    conn = get_connection()
-    try:
-        row = conn.execute("SELECT * FROM recurring_bills WHERE id = ?", (bill_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Recurring bill not found")
-
-        if payload.category_id is not None:
-            category = conn.execute(
-                "SELECT id FROM categories WHERE id = ?", (payload.category_id,)
-            ).fetchone()
-            if not category:
-                raise HTTPException(status_code=404, detail="Category not found")
-
-        if payload.apply_amount_to is not None and payload.apply_amount_to not in ("current", "all"):
-            raise HTTPException(status_code=422, detail="apply_amount_to must be 'current' or 'all'")
-
-        new_name = payload.name if payload.name is not None else row["name"]
-        new_amount = payload.amount if payload.amount is not None else row["amount"]
-        new_category_id = (
-            payload.category_id if payload.category_id is not None else row["category_id"]
-        )
-        new_active = payload.active if payload.active is not None else bool(row["active"])
-
-        conn.execute(
-            "UPDATE recurring_bills SET name = ?, amount = ?, category_id = ?, active = ? WHERE id = ?",
-            (new_name, new_amount, new_category_id, int(new_active), bill_id),
-        )
-
-        if payload.amount is not None and payload.amount != row["amount"]:
-            apply_scope = payload.apply_amount_to or "current"
-            if apply_scope == "all":
-                conn.execute(
-                    "UPDATE expenses SET amount = ? WHERE recurring_id = ?",
-                    (new_amount, bill_id),
-                )
-            else:
-                current_month = date.today().strftime("%Y-%m")
-                conn.execute(
-                    "UPDATE expenses SET amount = ? WHERE recurring_id = ? AND date LIKE ?",
-                    (new_amount, bill_id, f"{current_month}-%"),
-                )
-
-        conn.commit()
-
-        updated = conn.execute(
-            RECURRING_BILL_JOIN_SELECT + " WHERE r.id = ?", (bill_id,)
-        ).fetchone()
-        return row_to_recurring_bill(updated)
-    finally:
-        conn.close()
-
-
-@app.delete("/recurring-bills/{bill_id}", status_code=204)
-def delete_recurring_bill(bill_id: int):
-    conn = get_connection()
-    try:
-        row = conn.execute("SELECT id FROM recurring_bills WHERE id = ?", (bill_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Recurring bill not found")
-        # generated expenses/recurring_generated rows reference this id and must
-        # survive the delete, so FK enforcement is relaxed for this statement only
-        conn.execute("PRAGMA foreign_keys = OFF")
-        conn.execute("DELETE FROM recurring_bills WHERE id = ?", (bill_id,))
-        conn.commit()
-        return None
-    finally:
-        conn.close()
 
 
 def _now() -> str:
@@ -565,14 +414,10 @@ BANK_TRANSACTION_JOIN_SELECT = """
 
 
 def row_to_bank_transaction(conn, row) -> dict:
-    possible_duplicate = False
-    if row["amount"] < 0:
-        month = row["booking_date"][:7]
-        bills = conn.execute("SELECT * FROM recurring_bills WHERE active = 1").fetchall()
-        for bill in bills:
-            if bill["amount"] == abs(row["amount"]) and bill_applies_to_month(bill, month):
-                possible_duplicate = True
-                break
+    possible_duplicate = (
+        (row["amount"] < 0 and abs(row["amount"]) == RENT_AMOUNT and row["booking_date"][:7] >= RENT_START_MONTH)
+        or has_matching_cross_connection_charge(conn, row)
+    )
     return {
         "id": row["id"],
         "connection_id": row["connection_id"],
