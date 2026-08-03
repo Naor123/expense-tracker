@@ -1,14 +1,29 @@
 import { createScraper } from 'israeli-bank-scrapers';
+import readline from 'node:readline';
 
-async function readStdin() {
-  const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+const pendingLines = [];
+const pendingWaiters = [];
+rl.on('line', (line) => {
+  if (pendingWaiters.length) {
+    pendingWaiters.shift()(line);
+  } else {
+    pendingLines.push(line);
+  }
+});
+
+function nextLine() {
+  if (pendingLines.length) return Promise.resolve(pendingLines.shift());
+  return new Promise((resolve) => pendingWaiters.push(resolve));
+}
+
+function emit(obj) {
+  process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
 async function main() {
-  const input = await readStdin();
-  const { companyId, credentials, startDate, otpCode, longTermTwoFactorAuthToken } = input;
+  const input = JSON.parse(await nextLine());
+  const { companyId, credentials, startDate, deviceTrustData } = input;
 
   const options = {
     companyId,
@@ -16,42 +31,32 @@ async function main() {
     combineInstallments: false,
     showBrowser: false,
   };
-
-  // Hapoalim requires an OTP on first login; on a fresh run without otpCode we
-  // let it fail and report otpRequired so the caller can prompt and re-invoke
-  // with the code. longTermTwoFactorAuthToken persists device trust across runs.
-  if (otpCode) {
-    options.otpCodeRetriever = async () => otpCode;
-  }
-  if (longTermTwoFactorAuthToken) {
-    credentials.longTermTwoFactorAuthToken = longTermTwoFactorAuthToken;
+  if (deviceTrustData) {
+    options.deviceTrustData = deviceTrustData;
   }
 
   const scraper = createScraper(options);
-  const result = await scraper.login(credentials);
+  const result = await scraper.scrape({
+    ...credentials,
+    // Invoked by the Hapoalim scraper mid-login when it detects the OTP form;
+    // may be called more than once (it retries up to 3 times on a wrong code).
+    otpCodeRetriever: async ({ attempt }) => {
+      emit({ awaitingOtp: true, attempt });
+      return nextLine();
+    },
+  });
 
   if (!result.success) {
-    process.stdout.write(
-      JSON.stringify({
-        success: false,
-        errorType: result.errorType,
-        errorMessage: result.errorMessage,
-        otpRequired: result.errorType === 'otpFailed' || result.errorType === 'otpRequired',
-      })
-    );
+    emit({ success: false, errorType: result.errorType, errorMessage: result.errorMessage });
     process.exit(1);
   }
 
-  process.stdout.write(
-    JSON.stringify({
-      success: true,
-      accounts: result.accounts,
-      longTermTwoFactorAuthToken: result.longTermTwoFactorAuthToken,
-    })
-  );
+  emit({ success: true, accounts: result.accounts, deviceTrustData: result.deviceTrustData });
 }
 
-main().catch((err) => {
-  process.stdout.write(JSON.stringify({ success: false, errorMessage: String(err) }));
-  process.exit(1);
-});
+main()
+  .catch((err) => {
+    emit({ success: false, errorMessage: String(err) });
+    process.exit(1);
+  })
+  .finally(() => rl.close());

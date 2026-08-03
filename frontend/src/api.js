@@ -39,6 +39,10 @@ export const updateSalary = (month, amount) =>
 
 export const getBankConnections = () => api.get('/bank/connections').then((r) => r.data)
 export const connectBank = (payload) => api.post('/bank/connect', payload).then((r) => r.data)
+export const submitScraperOtp = (sessionId, otpCode, label) =>
+  api
+    .post('/bank/connect/otp', { session_id: sessionId, otp_code: otpCode, label })
+    .then((r) => r.data)
 export const deleteBankConnection = (id) => api.delete(`/bank/connections/${id}`)
 export const syncBank = (connectionId, dateFrom, dateTo) =>
   api

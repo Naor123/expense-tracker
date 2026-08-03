@@ -29,13 +29,14 @@ def _fetch_psd2(connection, date_from: str, date_to: str) -> List[NormalizedTxn]
 def _fetch_scraper(conn, connection, date_from: str) -> List[NormalizedTxn]:
     secrets = json.loads(crypto.decrypt(connection["secrets_enc"]))
     client = ScraperClient()
-    result = client.login_and_fetch(
+    result = client.sync_login(
         credentials=secrets["credentials"],
         start_date=date_from,
-        long_term_token=secrets.get("long_term_token"),
+        device_trust_data=secrets.get("device_trust_data"),
     )
-    if result.get("long_term_token") and result["long_term_token"] != secrets.get("long_term_token"):
-        secrets["long_term_token"] = result["long_term_token"]
+
+    if result.get("device_trust_data"):
+        secrets["device_trust_data"] = result["device_trust_data"]
         conn.execute(
             "UPDATE bank_connections SET secrets_enc = ? WHERE id = ?",
             (crypto.encrypt(json.dumps(secrets)), connection["id"]),

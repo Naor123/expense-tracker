@@ -102,7 +102,6 @@ class BankConnectCreate(BaseModel):
     # scraper only:
     user_code: Optional[str] = None
     password: Optional[str] = None
-    otp_code: Optional[str] = None
 
 
 class BankConnectionOut(BaseModel):
@@ -115,6 +114,12 @@ class BankConnectionOut(BaseModel):
     last_synced_at: Optional[str] = None
     last_error: Optional[str] = None
     sca_redirect_url: Optional[str] = None  # only set right after a psd2 /bank/connect
+
+
+class BankConnectOtpSubmit(BaseModel):
+    session_id: str
+    otp_code: str
+    label: str
 
 
 class BankSyncOut(BaseModel):

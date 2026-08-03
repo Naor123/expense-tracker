@@ -27,6 +27,7 @@ import {
   updateSalary,
   getBankConnections,
   connectBank,
+  submitScraperOtp,
   deleteBankConnection,
   syncBank,
   getBankTransactions,
@@ -183,9 +184,17 @@ function App() {
   }
 
   async function handleConnectBank(payload) {
-    const created = await connectBank(payload)
-    setBankConnections((prev) => [...prev, created])
-    return created
+    const result = await connectBank(payload)
+    if (result.status === 'otp_required') return result
+    setBankConnections((prev) => [...prev, result])
+    return result
+  }
+
+  async function handleSubmitScraperOtp(sessionId, otpCode, label) {
+    const result = await submitScraperOtp(sessionId, otpCode, label)
+    if (result.status === 'otp_required') return result
+    setBankConnections((prev) => [...prev, result])
+    return result
   }
 
   async function handleDeleteBankConnection(id) {
@@ -320,6 +329,7 @@ function App() {
           connections={bankConnections}
           onClose={() => setShowBankManager(false)}
           onConnect={handleConnectBank}
+          onSubmitOtp={handleSubmitScraperOtp}
           onDelete={handleDeleteBankConnection}
           onSync={handleSyncBank}
         />

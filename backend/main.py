@@ -18,6 +18,7 @@ from mailer import MailerConfigError, MailerSendError, send_summary_email
 from models import (
     BankConnectCreate,
     BankConnectionOut,
+    BankConnectOtpSubmit,
     BankSyncOut,
     BankTransactionApprove,
     BankTransactionOut,
@@ -582,7 +583,33 @@ def list_bank_connections():
         conn.close()
 
 
-@app.post("/bank/connect", response_model=BankConnectionOut, status_code=201)
+def _create_scraper_connection(conn, label: str, credentials: dict, scraped: dict) -> dict:
+    if not scraped["accounts"]:
+        raise HTTPException(status_code=502, detail="No accounts returned by scraper")
+
+    account_ref = scraped["accounts"][0].account_ref
+    secrets = crypto.encrypt(
+        json.dumps({"credentials": credentials, "device_trust_data": scraped.get("device_trust_data")})
+    )
+    cur = conn.execute(
+        """
+        INSERT INTO bank_connections
+            (provider, label, account_ref, status, secrets_enc, last_synced_at, created_at)
+        VALUES ('scraper', ?, ?, 'valid', ?, ?, ?)
+        """,
+        (label, account_ref, secrets, _now(), _now()),
+    )
+    conn.commit()
+    connection_id = cur.lastrowid
+
+    txns = scraped["transactions_by_account"].get(account_ref, [])
+    store_transactions(conn, connection_id, txns)
+
+    row = conn.execute("SELECT * FROM bank_connections WHERE id = ?", (connection_id,)).fetchone()
+    return row_to_bank_connection(row)
+
+
+@app.post("/bank/connect", status_code=201)
 def bank_connect(payload: BankConnectCreate):
     conn = get_connection()
     try:
@@ -627,39 +654,34 @@ def bank_connect(payload: BankConnectCreate):
             credentials = {"userCode": payload.user_code, "password": payload.password}
             start_date = (date.today() - timedelta(days=30)).isoformat()
             try:
-                scraped = ScraperClient().login_and_fetch(
-                    credentials, start_date, otp_code=payload.otp_code
-                )
+                result = ScraperClient().start_login(credentials, start_date)
             except BankAuthError as e:
                 raise HTTPException(status_code=401, detail=str(e))
-            if not scraped["accounts"]:
-                raise HTTPException(status_code=502, detail="No accounts returned by scraper")
 
-            account_ref = scraped["accounts"][0].account_ref
-            secrets = crypto.encrypt(
-                json.dumps({"credentials": credentials, "long_term_token": scraped.get("long_term_token")})
-            )
-            cur = conn.execute(
-                """
-                INSERT INTO bank_connections
-                    (provider, label, account_ref, status, secrets_enc, last_synced_at, created_at)
-                VALUES (?, ?, ?, 'valid', ?, ?, ?)
-                """,
-                (payload.provider, payload.label, account_ref, secrets, _now(), _now()),
-            )
-            conn.commit()
-            connection_id = cur.lastrowid
+            if result["status"] == "otp_required":
+                return {"status": "otp_required", "session_id": result["session_id"]}
 
-            txns = scraped["transactions_by_account"].get(account_ref, [])
-            store_transactions(conn, connection_id, txns)
-
-            row = conn.execute(
-                "SELECT * FROM bank_connections WHERE id = ?", (connection_id,)
-            ).fetchone()
-            return row_to_bank_connection(row)
+            return _create_scraper_connection(conn, payload.label, credentials, result)
 
         else:
             raise HTTPException(status_code=422, detail="provider must be 'psd2' or 'scraper'")
+    finally:
+        conn.close()
+
+
+@app.post("/bank/connect/otp")
+def bank_connect_otp(payload: BankConnectOtpSubmit):
+    conn = get_connection()
+    try:
+        try:
+            result = ScraperClient().submit_otp(payload.session_id, payload.otp_code)
+        except BankAuthError as e:
+            raise HTTPException(status_code=401, detail=str(e))
+
+        if result["status"] == "otp_required":
+            return {"status": "otp_required", "session_id": result["session_id"]}
+
+        return _create_scraper_connection(conn, payload.label, result["credentials"], result)
     finally:
         conn.close()
 

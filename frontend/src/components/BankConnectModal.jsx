@@ -16,13 +16,13 @@ function today() {
   return new Date().toISOString().slice(0, 10)
 }
 
-export default function BankConnectModal({ connections, onClose, onConnect, onDelete, onSync }) {
+export default function BankConnectModal({ connections, onClose, onConnect, onSubmitOtp, onDelete, onSync }) {
   const [provider, setProvider] = useState('psd2')
   const [label, setLabel] = useState('')
   const [userCode, setUserCode] = useState('')
   const [password, setPassword] = useState('')
+  const [otpSessionId, setOtpSessionId] = useState(null)
   const [otpCode, setOtpCode] = useState('')
-  const [needsOtp, setNeedsOtp] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [syncingId, setSyncingId] = useState(null)
@@ -32,8 +32,8 @@ export default function BankConnectModal({ connections, onClose, onConnect, onDe
     setLabel('')
     setUserCode('')
     setPassword('')
+    setOtpSessionId(null)
     setOtpCode('')
-    setNeedsOtp(false)
   }
 
   async function handleSubmit(e) {
@@ -46,29 +46,39 @@ export default function BankConnectModal({ connections, onClose, onConnect, onDe
     // would arrive too late and get popup-blocked.
     const popup = provider === 'psd2' ? window.open('', '_blank', 'noopener') : null
     try {
-      const payload = { provider, label: label.trim() }
-      if (provider === 'scraper') {
-        payload.user_code = userCode
-        payload.password = password
-        if (otpCode) payload.otp_code = otpCode
+      let result
+      if (otpSessionId) {
+        result = await onSubmitOtp(otpSessionId, otpCode, label.trim())
+      } else {
+        const payload = { provider, label: label.trim() }
+        if (provider === 'scraper') {
+          payload.user_code = userCode
+          payload.password = password
+        }
+        result = await onConnect(payload)
       }
-      const connection = await onConnect(payload)
-      if (popup && connection.sca_redirect_url) {
-        popup.location.href = connection.sca_redirect_url
+
+      if (result.status === 'otp_required') {
+        setOtpSessionId(result.session_id)
+        setOtpCode('')
+        setError(
+          otpSessionId
+            ? 'That code was not accepted. Enter the new code your bank just sent.'
+            : 'Enter the one-time code your bank just sent you.'
+        )
+        return
+      }
+
+      if (popup && result.sca_redirect_url) {
+        popup.location.href = result.sca_redirect_url
       } else if (popup) {
         popup.close()
       }
       resetForm()
     } catch (err) {
       if (popup) popup.close()
-      const status = err.response?.status
       const detail = err.response?.data?.detail || ''
-      if (status === 401 && /otp/i.test(detail)) {
-        setNeedsOtp(true)
-        setError('Enter the one-time code sent by your bank.')
-      } else {
-        setError(detail || 'Could not connect. Please try again.')
-      }
+      setError(detail || 'Could not connect. Please try again.')
     } finally {
       setSubmitting(false)
     }
@@ -162,84 +172,106 @@ export default function BankConnectModal({ connections, onClose, onConnect, onDe
         <div className="add-category-footer">
           <h3 className="card-title">Connect a Bank Account</h3>
           <form className="expense-form" onSubmit={handleSubmit}>
-            <div className="form-field">
-              <label htmlFor="bank-label">Label</label>
-              <input
-                id="bank-label"
-                type="text"
-                placeholder="e.g. Hapoalim Checking"
-                value={label}
-                onChange={(e) => setLabel(e.target.value)}
-                required
-              />
-            </div>
-
-            <div className="form-field">
-              <label htmlFor="bank-provider">Method</label>
-              <select
-                id="bank-provider"
-                value={provider}
-                onChange={(e) => {
-                  setProvider(e.target.value)
-                  setNeedsOtp(false)
-                  setError('')
-                }}
-              >
-                <option value="psd2">Open Banking (PSD2) — official, requires a licensed connection</option>
-                <option value="scraper">Direct login (israeli-bank-scrapers)</option>
-              </select>
-            </div>
-
-            {provider === 'psd2' && (
-              <p className="category-manager-error" style={{ color: 'var(--color-text-muted)' }}>
-                Opens your bank's consent page in a new tab. Requires production PSD2 credentials
-                configured on the server.
-              </p>
-            )}
-
-            {provider === 'scraper' && (
+            {otpSessionId ? (
               <>
-                <div className="form-row">
-                  <div className="form-field">
-                    <label htmlFor="bank-usercode">ID number</label>
-                    <input
-                      id="bank-usercode"
-                      type="text"
-                      value={userCode}
-                      onChange={(e) => setUserCode(e.target.value)}
-                      required
-                    />
-                  </div>
-                  <div className="form-field">
-                    <label htmlFor="bank-password">Password</label>
-                    <input
-                      id="bank-password"
-                      type="password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      required
-                    />
-                  </div>
+                <p className="category-manager-error" style={{ color: 'var(--color-text-muted)' }}>
+                  Hapoalim sent a one-time code to verify "{label}". Enter it below.
+                </p>
+                <div className="form-field">
+                  <label htmlFor="bank-otp">One-time code</label>
+                  <input
+                    id="bank-otp"
+                    type="text"
+                    inputMode="numeric"
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value)}
+                    autoFocus
+                    required
+                  />
                 </div>
-                {needsOtp && (
-                  <div className="form-field">
-                    <label htmlFor="bank-otp">One-time code</label>
-                    <input
-                      id="bank-otp"
-                      type="text"
-                      value={otpCode}
-                      onChange={(e) => setOtpCode(e.target.value)}
-                      autoFocus
-                    />
+                <div className="add-category-row">
+                  <button type="submit" className="inline-btn primary" disabled={submitting}>
+                    Confirm Code
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-btn"
+                    onClick={() => {
+                      resetForm()
+                      setError('')
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="form-field">
+                  <label htmlFor="bank-label">Label</label>
+                  <input
+                    id="bank-label"
+                    type="text"
+                    placeholder="e.g. Hapoalim Checking"
+                    value={label}
+                    onChange={(e) => setLabel(e.target.value)}
+                    required
+                  />
+                </div>
+
+                <div className="form-field">
+                  <label htmlFor="bank-provider">Method</label>
+                  <select
+                    id="bank-provider"
+                    value={provider}
+                    onChange={(e) => {
+                      setProvider(e.target.value)
+                      setError('')
+                    }}
+                  >
+                    <option value="psd2">Open Banking (PSD2) — official, requires a licensed connection</option>
+                    <option value="scraper">Direct login (israeli-bank-scrapers)</option>
+                  </select>
+                </div>
+
+                {provider === 'psd2' && (
+                  <p className="category-manager-error" style={{ color: 'var(--color-text-muted)' }}>
+                    Opens your bank's consent page in a new tab. Requires production PSD2 credentials
+                    configured on the server.
+                  </p>
+                )}
+
+                {provider === 'scraper' && (
+                  <div className="form-row">
+                    <div className="form-field">
+                      <label htmlFor="bank-usercode">ID number</label>
+                      <input
+                        id="bank-usercode"
+                        type="text"
+                        value={userCode}
+                        onChange={(e) => setUserCode(e.target.value)}
+                        required
+                      />
+                    </div>
+                    <div className="form-field">
+                      <label htmlFor="bank-password">Password</label>
+                      <input
+                        id="bank-password"
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        required
+                      />
+                    </div>
                   </div>
                 )}
+
+                <button type="submit" className="submit-btn" disabled={submitting}>
+                  {provider === 'psd2' ? <ExternalLink size={18} /> : <Plus size={18} />}
+                  {provider === 'psd2' ? 'Start Consent' : 'Connect'}
+                </button>
               </>
             )}
-
-            <button type="submit" className="submit-btn" disabled={submitting}>
-              {provider === 'psd2' ? <ExternalLink size={18} /> : <Plus size={18} />}
-              {provider === 'psd2' ? 'Start Consent' : needsOtp ? 'Confirm Code' : 'Connect'}
-            </button>
 
             {error && <div className="error-banner">{error}</div>}
           </form>
