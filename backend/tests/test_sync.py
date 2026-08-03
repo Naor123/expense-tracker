@@ -33,12 +33,31 @@ def test_store_transactions_is_idempotent(conn, bank_connection):
     assert count == 2
 
 
-def test_credits_are_auto_ignored(conn, bank_connection):
-    result = store_transactions(conn, bank_connection, [make_txn("tx-salary", amount=12000.0)])
+def test_unrecognized_incoming_bank_credit_stays_pending(conn, bank_connection):
+    result = store_transactions(conn, bank_connection, [make_txn("tx-credit", amount=12000.0)])
     assert result["inserted"] == 1
 
-    row = conn.execute("SELECT status FROM bank_transactions WHERE external_id = 'tx-salary'").fetchone()
+    row = conn.execute("SELECT status FROM bank_transactions WHERE external_id = 'tx-credit'").fetchone()
+    assert row["status"] == "pending"
+
+
+def test_card_side_incoming_credit_is_auto_ignored(conn, bank_connection):
+    store_transactions(conn, bank_connection, [make_txn("tx-refund", amount=50.0)], "max")
+    row = conn.execute("SELECT status FROM bank_transactions WHERE external_id = 'tx-refund'").fetchone()
     assert row["status"] == "ignored"
+
+
+def test_incoming_credit_matching_salary_rule_is_marked_salary_and_sets_monthly_salary(conn, bank_connection):
+    conn.execute("INSERT INTO salary_rules (pattern, created_at) VALUES ('test merchant', '2026-01-01')")
+    conn.commit()
+
+    store_transactions(conn, bank_connection, [make_txn("tx-salary", amount=17146.21)])
+
+    row = conn.execute("SELECT status FROM bank_transactions WHERE external_id = 'tx-salary'").fetchone()
+    assert row["status"] == "salary"
+
+    salary_row = conn.execute("SELECT amount FROM monthly_salary WHERE month = '2026-07'").fetchone()
+    assert salary_row["amount"] == 17146.21
 
 
 def test_debits_are_pending(conn, bank_connection):

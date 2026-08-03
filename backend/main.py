@@ -14,7 +14,14 @@ from bank.errors import BankAuthError, BankConfigError, BankFetchError
 from bank.psd2 import Psd2Client
 from bank.scraper import ScraperClient
 from bank.sync import store_transactions, sync_bank_transactions
-from db import bill_applies_to_month, get_connection, get_salary_for_month, init_db, sync_recurring_bills
+from db import (
+    bill_applies_to_month,
+    get_connection,
+    get_salary_for_month,
+    init_db,
+    set_salary_for_month,
+    sync_recurring_bills,
+)
 from mailer import MailerConfigError, MailerSendError, send_summary_email
 from models import (
     BankConnectCreate,
@@ -23,6 +30,7 @@ from models import (
     BankReverifyOtpSubmit,
     BankSyncOut,
     BankTransactionApprove,
+    BankTransactionMarkSalary,
     BankTransactionOut,
     BankTransactionsBulkApprove,
     CategoryCreate,
@@ -352,13 +360,7 @@ def set_salary(payload: SalaryUpdate, month: str | None = None):
     validate_month(month)
     conn = get_connection()
     try:
-        conn.execute(
-            """
-            INSERT INTO monthly_salary (month, amount) VALUES (?, ?)
-            ON CONFLICT(month) DO UPDATE SET amount = excluded.amount
-            """,
-            (month, payload.amount),
-        )
+        set_salary_for_month(conn, month, payload.amount)
         conn.commit()
         return {"month": month, "amount": payload.amount}
     finally:
@@ -537,8 +539,8 @@ def row_to_bank_connection(row) -> dict:
 
 BANK_TRANSACTION_JOIN_SELECT = """
     SELECT t.id, t.connection_id, t.external_id, t.booking_date, t.value_date, t.amount,
-           t.currency, t.counterparty, t.description, t.status, t.kind, t.suggested_category_id,
-           t.expense_id, c.name AS suggested_category_name
+           t.currency, t.counterparty, t.description, t.status, t.kind, t.settlement,
+           t.suggested_category_id, t.expense_id, c.name AS suggested_category_name
     FROM bank_transactions t
     LEFT JOIN categories c ON c.id = t.suggested_category_id
 """
@@ -565,6 +567,7 @@ def row_to_bank_transaction(conn, row) -> dict:
         "description": row["description"],
         "status": row["status"],
         "kind": row["kind"],
+        "settlement": row["settlement"],
         "suggested_category_id": row["suggested_category_id"],
         "suggested_category_name": row["suggested_category_name"],
         "expense_id": row["expense_id"],
@@ -943,6 +946,35 @@ def ignore_bank_transaction(txn_id: int):
 
         conn.execute("UPDATE bank_transactions SET status = 'ignored' WHERE id = ?", (txn_id,))
         conn.commit()
+        updated = conn.execute(
+            BANK_TRANSACTION_JOIN_SELECT + " WHERE t.id = ?", (txn_id,)
+        ).fetchone()
+        return row_to_bank_transaction(conn, updated)
+    finally:
+        conn.close()
+
+
+@app.post("/bank/transactions/{txn_id}/mark-salary", response_model=BankTransactionOut)
+def mark_bank_transaction_salary(txn_id: int, payload: BankTransactionMarkSalary):
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM bank_transactions WHERE id = ?", (txn_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Bank transaction not found")
+        if row["status"] != "pending":
+            raise HTTPException(status_code=409, detail=f"Transaction is already {row['status']}")
+        if row["amount"] <= 0:
+            raise HTTPException(status_code=422, detail="Only incoming credits can be marked as salary")
+
+        set_salary_for_month(conn, row["booking_date"][:7], row["amount"])
+        if payload.save_rule and row["counterparty"]:
+            conn.execute(
+                "INSERT INTO salary_rules (pattern, created_at) VALUES (?, ?)",
+                (row["counterparty"], _now()),
+            )
+        conn.execute("UPDATE bank_transactions SET status = 'salary' WHERE id = ?", (txn_id,))
+        conn.commit()
+
         updated = conn.execute(
             BANK_TRANSACTION_JOIN_SELECT + " WHERE t.id = ?", (txn_id,)
         ).fetchone()

@@ -32,3 +32,13 @@ def classify_transaction(counterparty: str, description: str, company_id: str) -
         return "credit_card_payment"
 
     return "bank_transfer"
+
+
+def classify_settlement(booking_date: str, value_date: str | None) -> str:
+    """Returns 'immediate' (settles within days — typically foreign-currency
+    purchases) or 'delayed' (rides the card company's ~10th-of-next-month lump
+    sum) based on whether value_date crosses into a later calendar month than
+    booking_date."""
+    if not value_date:
+        return "immediate"
+    return "delayed" if value_date[:7] > booking_date[:7] else "immediate"

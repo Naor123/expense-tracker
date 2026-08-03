@@ -61,6 +61,8 @@ export const approveBankTransaction = (id, data) =>
   api.post(`/bank/transactions/${id}/approve`, data).then((r) => r.data)
 export const ignoreBankTransaction = (id) =>
   api.post(`/bank/transactions/${id}/ignore`).then((r) => r.data)
+export const markBankTransactionSalary = (id, saveRule) =>
+  api.post(`/bank/transactions/${id}/mark-salary`, { save_rule: saveRule }).then((r) => r.data)
 export const approveBankTransactionsBulk = (ids) =>
   api.post('/bank/transactions/approve-bulk', { ids }).then((r) => r.data)
 

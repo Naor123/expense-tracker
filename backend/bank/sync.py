@@ -3,12 +3,14 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from bank import crypto
-from bank.classify import CREDIT_CARD_COMPANY_IDS, classify_transaction
+from bank.classify import CREDIT_CARD_COMPANY_IDS, classify_settlement, classify_transaction
 from bank.errors import BankAuthError, BankConfigError, BankFetchError
 from bank.psd2 import Psd2Client
 from bank.rules import suggest_category
+from bank.salary import match_salary_rule
 from bank.scraper import ScraperClient
 from bank.types import NormalizedTxn
+from db import set_salary_for_month
 
 
 def _now() -> str:
@@ -81,8 +83,17 @@ def store_transactions(conn, connection_id: int, txns: List[NormalizedTxn], comp
     inserted = 0
     for txn in txns:
         kind = classify_transaction(txn.counterparty, txn.description, company_id)
+        settlement = classify_settlement(txn.booking_date, txn.value_date)
         if txn.amount > 0:
-            status = "ignored"
+            if kind == "bank_transfer" and match_salary_rule(conn, txn.counterparty):
+                status = "salary"
+                set_salary_for_month(conn, txn.booking_date[:7], txn.amount)
+            elif kind == "bank_transfer":
+                # Unrecognized incoming bank credit — let the user confirm/ignore
+                # or mark it as a salary source in the review UI.
+                status = "pending"
+            else:
+                status = "ignored"  # card-side credits (refunds etc.)
         elif kind == "credit_card_payment" and _has_active_credit_card_connection(conn, connection_id):
             # Same spending as the itemized credit_card_charge rows from the card
             # connection — counting both would double it.
@@ -94,13 +105,13 @@ def store_transactions(conn, connection_id: int, txns: List[NormalizedTxn], comp
             """
             INSERT OR IGNORE INTO bank_transactions
                 (connection_id, external_id, booking_date, value_date, amount, currency,
-                 counterparty, description, raw_json, status, kind, suggested_category_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 counterparty, description, raw_json, status, kind, settlement, suggested_category_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 connection_id, txn.external_id, txn.booking_date, txn.value_date, txn.amount,
                 txn.currency, txn.counterparty, txn.description, json.dumps(txn.raw),
-                status, kind, category_id, _now(),
+                status, kind, settlement, category_id, _now(),
             ),
         )
         if cur.rowcount:

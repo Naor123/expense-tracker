@@ -147,6 +147,7 @@ class BankTransactionOut(BaseModel):
     description: Optional[str] = None
     status: str
     kind: str
+    settlement: str
     suggested_category_id: Optional[int] = None
     suggested_category_name: Optional[str] = None
     expense_id: Optional[int] = None
@@ -158,6 +159,10 @@ class BankTransactionApprove(BaseModel):
     note: Optional[str] = None
     save_rule: bool = False
     rule_pattern: Optional[str] = None
+
+
+class BankTransactionMarkSalary(BaseModel):
+    save_rule: bool = False
 
 
 class BankTransactionsBulkApprove(BaseModel):

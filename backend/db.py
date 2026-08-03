@@ -139,6 +139,15 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS salary_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         conn.commit()
 
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(expenses)").fetchall()]
@@ -161,6 +170,9 @@ def init_db():
         txn_columns = [row["name"] for row in conn.execute("PRAGMA table_info(bank_transactions)").fetchall()]
         if "kind" not in txn_columns:
             conn.execute("ALTER TABLE bank_transactions ADD COLUMN kind TEXT NOT NULL DEFAULT 'bank_transfer'")
+            conn.commit()
+        if "settlement" not in txn_columns:
+            conn.execute("ALTER TABLE bank_transactions ADD COLUMN settlement TEXT NOT NULL DEFAULT 'immediate'")
             conn.commit()
 
         for name, color in SEED_CATEGORIES:
@@ -237,6 +249,16 @@ def get_salary_for_month(conn, month: str):
         except ValueError:
             return None
     return None
+
+
+def set_salary_for_month(conn, month: str, amount: float):
+    conn.execute(
+        """
+        INSERT INTO monthly_salary (month, amount) VALUES (?, ?)
+        ON CONFLICT(month) DO UPDATE SET amount = excluded.amount
+        """,
+        (month, amount),
+    )
 
 
 def sync_recurring_bills(conn):

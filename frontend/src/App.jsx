@@ -35,6 +35,7 @@ import {
   getBankTransactions,
   approveBankTransaction,
   ignoreBankTransaction,
+  markBankTransactionSalary,
   approveBankTransactionsBulk,
 } from './api'
 
@@ -240,6 +241,13 @@ function App() {
     setPendingTxns((prev) => prev.filter((t) => t.id !== id))
   }
 
+  async function handleMarkBankTxnSalary(id, saveRule) {
+    await markBankTransactionSalary(id, saveRule)
+    setPendingTxns((prev) => prev.filter((t) => t.id !== id))
+    const updated = await getSalary(month)
+    setSalary(updated)
+  }
+
   async function handleBulkApproveBankTxns(ids) {
     await approveBankTransactionsBulk(ids)
     setPendingTxns((prev) => prev.filter((t) => !ids.includes(t.id)))
@@ -367,6 +375,7 @@ function App() {
           onApprove={handleApproveBankTxn}
           onIgnore={handleIgnoreBankTxn}
           onBulkApprove={handleBulkApproveBankTxns}
+          onMarkSalary={handleMarkBankTxnSalary}
         />
       )}
     </>
