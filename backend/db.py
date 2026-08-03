@@ -14,6 +14,7 @@ SEED_CATEGORIES = [
     ("Car", "#FFD93D"),
     ("Entertainment", "#6BCB77"),
     ("Going Out", "#FF8C42"),
+    ("Uncategorized", "#9CA3AF"),
 ]
 
 SEED_RECURRING_BILLS = [
@@ -90,12 +91,65 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bank_connections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                label TEXT NOT NULL,
+                account_ref TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                consent_id TEXT,
+                consent_valid_until TEXT,
+                secrets_enc TEXT,
+                last_synced_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bank_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                connection_id INTEGER NOT NULL REFERENCES bank_connections(id),
+                external_id TEXT NOT NULL,
+                booking_date TEXT NOT NULL,
+                value_date TEXT,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'ILS',
+                counterparty TEXT,
+                description TEXT,
+                raw_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                suggested_category_id INTEGER REFERENCES categories(id),
+                expense_id INTEGER REFERENCES expenses(id),
+                created_at TEXT NOT NULL,
+                UNIQUE (connection_id, external_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS category_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern TEXT NOT NULL,
+                category_id INTEGER NOT NULL REFERENCES categories(id),
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         conn.commit()
 
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(expenses)").fetchall()]
         if "recurring_id" not in columns:
             conn.execute(
                 "ALTER TABLE expenses ADD COLUMN recurring_id INTEGER REFERENCES recurring_bills(id)"
+            )
+            conn.commit()
+        if "bank_txn_id" not in columns:
+            conn.execute(
+                "ALTER TABLE expenses ADD COLUMN bank_txn_id INTEGER REFERENCES bank_transactions(id)"
             )
             conn.commit()
 

@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Settings, Repeat, Mail, Check } from 'lucide-react'
+import { Settings, Repeat, Mail, Check, Landmark, Inbox } from 'lucide-react'
 import MonthPicker from './components/MonthPicker'
 import AddExpenseForm from './components/AddExpenseForm'
 import ExpensePieChart from './components/ExpensePieChart'
 import ExpenseList from './components/ExpenseList'
 import CategoryManager from './components/CategoryManager'
 import RecurringBillsManager from './components/RecurringBillsManager'
+import BankConnectModal from './components/BankConnectModal'
+import ImportReviewModal from './components/ImportReviewModal'
 import ThemeToggle from './components/ThemeToggle'
 import {
   getCategories,
@@ -23,6 +25,14 @@ import {
   sendInsightsEmail,
   getSalary,
   updateSalary,
+  getBankConnections,
+  connectBank,
+  deleteBankConnection,
+  syncBank,
+  getBankTransactions,
+  approveBankTransaction,
+  ignoreBankTransaction,
+  approveBankTransactionsBulk,
 } from './api'
 
 function currentMonth() {
@@ -42,6 +52,10 @@ function App() {
   const [sendingEmail, setSendingEmail] = useState(false)
   const [emailFeedback, setEmailFeedback] = useState(null)
   const [salary, setSalary] = useState(null)
+  const [bankConnections, setBankConnections] = useState([])
+  const [showBankManager, setShowBankManager] = useState(false)
+  const [pendingTxns, setPendingTxns] = useState([])
+  const [showImportReview, setShowImportReview] = useState(false)
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -99,6 +113,23 @@ function App() {
     }
   }, [month])
 
+  const loadBankConnections = useCallback(() => {
+    return getBankConnections()
+      .then(setBankConnections)
+      .catch(() => {})
+  }, [])
+
+  const loadPendingTxns = useCallback(() => {
+    return getBankTransactions('pending')
+      .then(setPendingTxns)
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    loadBankConnections()
+    loadPendingTxns()
+  }, [loadBankConnections, loadPendingTxns])
+
   async function handleAddExpense(expense) {
     const created = await createExpense(expense)
     setExpenses((prev) => [...prev, created])
@@ -151,6 +182,39 @@ function App() {
     setSalary(updated)
   }
 
+  async function handleConnectBank(payload) {
+    const created = await connectBank(payload)
+    setBankConnections((prev) => [...prev, created])
+    return created
+  }
+
+  async function handleDeleteBankConnection(id) {
+    await deleteBankConnection(id)
+    setBankConnections((prev) => prev.filter((c) => c.id !== id))
+  }
+
+  async function handleSyncBank(connectionId, dateFrom, dateTo) {
+    await syncBank(connectionId, dateFrom, dateTo)
+    await Promise.all([loadBankConnections(), loadPendingTxns()])
+  }
+
+  async function handleApproveBankTxn(id, data) {
+    await approveBankTransaction(id, data)
+    setPendingTxns((prev) => prev.filter((t) => t.id !== id))
+    await loadMonthData()
+  }
+
+  async function handleIgnoreBankTxn(id) {
+    await ignoreBankTransaction(id)
+    setPendingTxns((prev) => prev.filter((t) => t.id !== id))
+  }
+
+  async function handleBulkApproveBankTxns(ids) {
+    await approveBankTransactionsBulk(ids)
+    setPendingTxns((prev) => prev.filter((t) => !ids.includes(t.id)))
+    await loadMonthData()
+  }
+
   async function handleSendInsightsEmail() {
     setSendingEmail(true)
     setEmailFeedback(null)
@@ -178,6 +242,21 @@ function App() {
             aria-label="Manage recurring bills"
           >
             <Repeat size={18} />
+          </button>
+          <button
+            className="icon-btn"
+            onClick={() => setShowBankManager(true)}
+            aria-label="Manage bank connections"
+          >
+            <Landmark size={18} />
+          </button>
+          <button
+            className={pendingTxns.length ? 'icon-btn header-icon-badge' : 'icon-btn'}
+            data-count={pendingTxns.length || undefined}
+            onClick={() => setShowImportReview(true)}
+            aria-label="Review imported bank transactions"
+          >
+            <Inbox size={18} />
           </button>
           <button className="icon-btn" onClick={() => setShowManager(true)} aria-label="Open settings">
             <Settings size={18} />
@@ -233,6 +312,27 @@ function App() {
           onCreate={handleCreateRecurringBill}
           onUpdate={handleUpdateRecurringBill}
           onDelete={handleDeleteRecurringBill}
+        />
+      )}
+
+      {showBankManager && (
+        <BankConnectModal
+          connections={bankConnections}
+          onClose={() => setShowBankManager(false)}
+          onConnect={handleConnectBank}
+          onDelete={handleDeleteBankConnection}
+          onSync={handleSyncBank}
+        />
+      )}
+
+      {showImportReview && (
+        <ImportReviewModal
+          transactions={pendingTxns}
+          categories={categories}
+          onClose={() => setShowImportReview(false)}
+          onApprove={handleApproveBankTxn}
+          onIgnore={handleIgnoreBankTxn}
+          onBulkApprove={handleBulkApproveBankTxns}
         />
       )}
     </>

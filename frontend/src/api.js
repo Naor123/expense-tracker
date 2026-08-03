@@ -37,4 +37,26 @@ export const getSalary = (month) =>
 export const updateSalary = (month, amount) =>
   api.put('/salary', { amount }, { params: { month } }).then((r) => r.data)
 
+export const getBankConnections = () => api.get('/bank/connections').then((r) => r.data)
+export const connectBank = (payload) => api.post('/bank/connect', payload).then((r) => r.data)
+export const deleteBankConnection = (id) => api.delete(`/bank/connections/${id}`)
+export const syncBank = (connectionId, dateFrom, dateTo) =>
+  api
+    .post('/bank/sync', null, { params: { connection_id: connectionId, date_from: dateFrom, date_to: dateTo } })
+    .then((r) => r.data)
+
+export const getBankTransactions = (status) =>
+  api.get('/bank/transactions', { params: { status } }).then((r) => r.data)
+export const approveBankTransaction = (id, data) =>
+  api.post(`/bank/transactions/${id}/approve`, data).then((r) => r.data)
+export const ignoreBankTransaction = (id) =>
+  api.post(`/bank/transactions/${id}/ignore`).then((r) => r.data)
+export const approveBankTransactionsBulk = (ids) =>
+  api.post('/bank/transactions/approve-bulk', { ids }).then((r) => r.data)
+
+export const getCategoryRules = () => api.get('/category-rules').then((r) => r.data)
+export const createCategoryRule = (pattern, categoryId) =>
+  api.post('/category-rules', { pattern, category_id: categoryId }).then((r) => r.data)
+export const deleteCategoryRule = (id) => api.delete(`/category-rules/${id}`)
+
 export default api

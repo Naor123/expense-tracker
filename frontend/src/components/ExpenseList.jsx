@@ -66,7 +66,8 @@ export default function ExpenseList({ expenses, onDelete }) {
 
   const sortFn = (a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id)
   const recurring = expenses.filter((e) => e.recurring_id).sort(sortFn)
-  const other = expenses.filter((e) => !e.recurring_id).sort(sortFn)
+  const imported = expenses.filter((e) => e.bank_txn_id).sort(sortFn)
+  const other = expenses.filter((e) => !e.recurring_id && !e.bank_txn_id).sort(sortFn)
 
   return (
     <>
@@ -77,6 +78,15 @@ export default function ExpenseList({ expenses, onDelete }) {
         emptyText="No recurring bills for this month."
         defaultExpanded={false}
       />
+      {imported.length > 0 && (
+        <CollapsibleGroup
+          title="Imported from Bank"
+          items={imported}
+          onDelete={onDelete}
+          emptyText="No imported transactions for this month."
+          defaultExpanded={false}
+        />
+      )}
       <CollapsibleGroup
         title="Other Expenses"
         items={other}

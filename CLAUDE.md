@@ -10,7 +10,9 @@ backend\.venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
-No test suite or linter configured for the backend.
+Backend tests (pytest, covers `bank/` only so far): `cd backend && .venv\Scripts\python.exe -m pytest tests/ -v`. No linter configured for the backend.
+
+Mock PSD2 ASPSP (for exercising the bank connector without real bank credentials): `cd backend && uvicorn bank.mock_server:app --port 8010`, then set `PSD2_BASE_URL=http://localhost:8010` in `backend/.env`.
 
 Frontend (`frontend/`, React 19 + Vite):
 ```
@@ -47,3 +49,15 @@ Category deletion is blocked (409) if it's the last remaining category or if any
 `CategoryManager.jsx` (opened via the header's `Settings` icon) doubles as the general settings modal — it holds both category CRUD and the Net Salary inline editor (`salary`/`onUpdateSalary` props), not just categories despite the filename. The header also has a `Repeat` icon (opens `RecurringBillsManager`) and a `Mail` icon (`handleSendInsightsEmail` — fire-and-forget, feedback shown via a transient banner under the header using the shared `success-banner`/`error-banner` classes).
 
 Note: `expense-list[hidden]` needs an explicit `display: none` override in `index.css` — the `.expense-list { display: flex }` class rule otherwise beats the `[hidden]` attribute's default styling.
+
+**Bank connector (`backend/bank/`)** — imports transactions from Bank Hapoalim instead of manual entry. Two interchangeable providers implement the same `BankProvider` protocol (`bank/base.py`), selected via `BANK_PROVIDER` env var and both normalizing to `NormalizedTxn` (`bank/types.py`):
+- `bank/psd2.py` — a Berlin Group AIS client for the Bank of Israel's NextGenPSD2 profile (OAuth SCA approach only — the spec's plain `scaRedirect` link is commented out, so authorization is consent → `scaOAuth` link → OAuth2 Authorization Server Metadata → standard authorization-code redirect → `/bank/callback` → token exchange → Bearer-authenticated AIS calls). **Requires a Capital Markets Authority TPP license for production credentials** — Hapoalim will not issue `client_id`/mTLS certs to an individual for personal use. `bank/mock_server.py` is a standalone FastAPI ASPSP replaying the spec's own examples so the whole flow is testable without real credentials.
+- `bank/scraper.py` + `bank/sidecar/` — shells out to the Node `israeli-bank-scrapers` package (`bank/sidecar/scrape.mjs`) to log into Hapoalim's own web banking with real credentials and scrape transactions. Works today with your real account; no licensing needed since it's not a PSD2 TPP integration, but it depends on the bank's website not changing and is subject to Hapoalim's own terms of use.
+
+New tables (`db.py`): `bank_connections` (one row per connected account, `secrets_enc` is a Fernet blob keyed by `BANK_ENC_KEY` holding tokens or scraper credentials), `bank_transactions` (staging table, `UNIQUE(connection_id, external_id)` makes re-syncing an overlapping date range a no-op — same idempotency role `recurring_generated` plays for recurring bills), `category_rules` (substring-match merchant→category rules, checked by `bank/rules.py:suggest_category`). `expenses` gained a `bank_txn_id` column (via the same `PRAGMA table_info` migration guard as `recurring_id`).
+
+**Sync is explicit, never on-read** — unlike `sync_recurring_bills`, `bank/sync.py:sync_bank_transactions` is only invoked from `POST /bank/sync`. It does real network I/O and BOI's spec caps unattended AIS access at a fixed `frequencyPerDay: 100`, so wiring it into `GET /expenses` like the recurring-bill sync would be both slow and a rate-limit risk.
+
+Imported transactions land in `bank_transactions` with `status='pending'` (credits are auto-`ignored` so salary/refunds never become expenses) and require review via `POST /bank/transactions/{id}/approve` (or `/ignore`, or bulk-approve) before becoming a real row in `expenses` — this is deliberate, since the recurring-bill generator already creates expenses for bills like Rent/Arnona/Gym, and auto-inserting the bank's version of those would double-count them. `GET /bank/transactions` flags `possible_duplicate` when a pending transaction's amount matches an active recurring bill for that month (reuses `db.py:bill_applies_to_month`).
+
+Frontend: `BankConnectModal.jsx` (connections list + connect form; opens a blank popup synchronously on click and only sets its `location.href` after the `await onConnect(...)` resolves, since setting it after the await in one step gets popup-blocked) and `ImportReviewModal.jsx` (pending-transaction review, opened from the header's `Inbox` icon which shows a pending-count badge). `ExpenseList.jsx` groups by `bank_txn_id` into a third "Imported from Bank" section alongside Recurring/Other.

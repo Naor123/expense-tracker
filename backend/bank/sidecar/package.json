@@ -1,0 +1,9 @@
+{
+  "name": "expense-tracker-bank-sidecar",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "israeli-bank-scrapers": "^6.7.3"
+  }
+}

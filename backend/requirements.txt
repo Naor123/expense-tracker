@@ -2,3 +2,7 @@ fastapi
 uvicorn[standard]
 pydantic
 python-dotenv
+httpx
+cryptography
+pydantic-settings
+pytest

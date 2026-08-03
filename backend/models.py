@@ -35,6 +35,7 @@ class ExpenseOut(BaseModel):
     date: str
     note: Optional[str] = None
     recurring_id: Optional[int] = None
+    bank_txn_id: Optional[int] = None
 
 
 class SummaryCategory(BaseModel):
@@ -93,3 +94,70 @@ class RecurringBillOut(BaseModel):
     month_parity: Optional[str] = None
     start_month: str
     active: bool
+
+
+class BankConnectCreate(BaseModel):
+    provider: str  # 'psd2' | 'scraper'
+    label: str
+    # scraper only:
+    user_code: Optional[str] = None
+    password: Optional[str] = None
+    otp_code: Optional[str] = None
+
+
+class BankConnectionOut(BaseModel):
+    id: int
+    provider: str
+    label: str
+    account_ref: Optional[str] = None
+    status: str
+    consent_valid_until: Optional[str] = None
+    last_synced_at: Optional[str] = None
+    last_error: Optional[str] = None
+    sca_redirect_url: Optional[str] = None  # only set right after a psd2 /bank/connect
+
+
+class BankSyncOut(BaseModel):
+    fetched: int
+    inserted: int
+    skipped: int
+
+
+class BankTransactionOut(BaseModel):
+    id: int
+    connection_id: int
+    external_id: str
+    booking_date: str
+    value_date: Optional[str] = None
+    amount: float
+    currency: str
+    counterparty: Optional[str] = None
+    description: Optional[str] = None
+    status: str
+    suggested_category_id: Optional[int] = None
+    suggested_category_name: Optional[str] = None
+    expense_id: Optional[int] = None
+    possible_duplicate: bool = False
+
+
+class BankTransactionApprove(BaseModel):
+    category_id: int
+    note: Optional[str] = None
+    save_rule: bool = False
+    rule_pattern: Optional[str] = None
+
+
+class BankTransactionsBulkApprove(BaseModel):
+    ids: list[int]
+
+
+class CategoryRuleCreate(BaseModel):
+    pattern: str
+    category_id: int
+
+
+class CategoryRuleOut(BaseModel):
+    id: int
+    pattern: str
+    category_id: int
+    category_name: str

@@ -1,15 +1,31 @@
+import json
 import os
 import re
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
-from db import get_connection, get_salary_for_month, init_db, sync_recurring_bills
+from bank import crypto
+from bank.config import get_bank_settings
+from bank.errors import BankAuthError, BankConfigError, BankFetchError
+from bank.psd2 import Psd2Client
+from bank.scraper import ScraperClient
+from bank.sync import store_transactions, sync_bank_transactions
+from db import bill_applies_to_month, get_connection, get_salary_for_month, init_db, sync_recurring_bills
 from mailer import MailerConfigError, MailerSendError, send_summary_email
 from models import (
+    BankConnectCreate,
+    BankConnectionOut,
+    BankSyncOut,
+    BankTransactionApprove,
+    BankTransactionOut,
+    BankTransactionsBulkApprove,
     CategoryCreate,
     CategoryOut,
+    CategoryRuleCreate,
+    CategoryRuleOut,
     CategoryUpdate,
     ExpenseCreate,
     ExpenseOut,
@@ -65,6 +81,7 @@ def row_to_expense(row) -> dict:
         "date": row["date"],
         "note": row["note"],
         "recurring_id": row["recurring_id"],
+        "bank_txn_id": row["bank_txn_id"],
     }
 
 
@@ -85,7 +102,7 @@ def row_to_recurring_bill(row) -> dict:
 
 EXPENSE_JOIN_SELECT = """
     SELECT e.id, e.amount, e.category_id, c.name AS category_name,
-           c.color AS category_color, e.date, e.note, e.recurring_id
+           c.color AS category_color, e.date, e.note, e.recurring_id, e.bank_txn_id
     FROM expenses e
     JOIN categories c ON c.id = e.category_id
 """
@@ -487,6 +504,417 @@ def delete_recurring_bill(bill_id: int):
         # survive the delete, so FK enforcement is relaxed for this statement only
         conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute("DELETE FROM recurring_bills WHERE id = ?", (bill_id,))
+        conn.commit()
+        return None
+    finally:
+        conn.close()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def row_to_bank_connection(row) -> dict:
+    return {
+        "id": row["id"],
+        "provider": row["provider"],
+        "label": row["label"],
+        "account_ref": row["account_ref"],
+        "status": row["status"],
+        "consent_valid_until": row["consent_valid_until"],
+        "last_synced_at": row["last_synced_at"],
+        "last_error": row["last_error"],
+    }
+
+
+BANK_TRANSACTION_JOIN_SELECT = """
+    SELECT t.id, t.connection_id, t.external_id, t.booking_date, t.value_date, t.amount,
+           t.currency, t.counterparty, t.description, t.status, t.suggested_category_id,
+           t.expense_id, c.name AS suggested_category_name
+    FROM bank_transactions t
+    LEFT JOIN categories c ON c.id = t.suggested_category_id
+"""
+
+
+def row_to_bank_transaction(conn, row) -> dict:
+    possible_duplicate = False
+    if row["amount"] < 0:
+        month = row["booking_date"][:7]
+        bills = conn.execute("SELECT * FROM recurring_bills WHERE active = 1").fetchall()
+        for bill in bills:
+            if bill["amount"] == abs(row["amount"]) and bill_applies_to_month(bill, month):
+                possible_duplicate = True
+                break
+    return {
+        "id": row["id"],
+        "connection_id": row["connection_id"],
+        "external_id": row["external_id"],
+        "booking_date": row["booking_date"],
+        "value_date": row["value_date"],
+        "amount": row["amount"],
+        "currency": row["currency"],
+        "counterparty": row["counterparty"],
+        "description": row["description"],
+        "status": row["status"],
+        "suggested_category_id": row["suggested_category_id"],
+        "suggested_category_name": row["suggested_category_name"],
+        "expense_id": row["expense_id"],
+        "possible_duplicate": possible_duplicate,
+    }
+
+
+def row_to_category_rule(row) -> dict:
+    return {
+        "id": row["id"],
+        "pattern": row["pattern"],
+        "category_id": row["category_id"],
+        "category_name": row["category_name"],
+    }
+
+
+@app.get("/bank/connections", response_model=list[BankConnectionOut])
+def list_bank_connections():
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT * FROM bank_connections ORDER BY id").fetchall()
+        return [row_to_bank_connection(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.post("/bank/connect", response_model=BankConnectionOut, status_code=201)
+def bank_connect(payload: BankConnectCreate):
+    conn = get_connection()
+    try:
+        if payload.provider == "psd2":
+            client = Psd2Client()
+            try:
+                consent = client.create_consent()
+                oauth_meta = client.get_oauth_metadata(consent["sca_oauth_url"])
+            except (BankAuthError, BankFetchError) as e:
+                raise HTTPException(status_code=502, detail=str(e))
+
+            secrets = crypto.encrypt(json.dumps({"oauth_metadata": oauth_meta}))
+            cur = conn.execute(
+                """
+                INSERT INTO bank_connections
+                    (provider, label, status, consent_id, secrets_enc, created_at)
+                VALUES (?, ?, 'pending', ?, ?, ?)
+                """,
+                (payload.provider, payload.label, consent["consent_id"], secrets, _now()),
+            )
+            conn.commit()
+            connection_id = cur.lastrowid
+
+            settings = get_bank_settings()
+            auth_url = client.build_authorization_url(
+                oauth_meta, consent["consent_id"], settings.psd2_client_id, state=str(connection_id)
+            )
+
+            row = conn.execute(
+                "SELECT * FROM bank_connections WHERE id = ?", (connection_id,)
+            ).fetchone()
+            result = row_to_bank_connection(row)
+            result["sca_redirect_url"] = auth_url
+            return result
+
+        elif payload.provider == "scraper":
+            if not payload.user_code or not payload.password:
+                raise HTTPException(
+                    status_code=422,
+                    detail="user_code and password are required for the scraper provider",
+                )
+            credentials = {"userCode": payload.user_code, "password": payload.password}
+            start_date = (date.today() - timedelta(days=30)).isoformat()
+            try:
+                scraped = ScraperClient().login_and_fetch(
+                    credentials, start_date, otp_code=payload.otp_code
+                )
+            except BankAuthError as e:
+                raise HTTPException(status_code=401, detail=str(e))
+            if not scraped["accounts"]:
+                raise HTTPException(status_code=502, detail="No accounts returned by scraper")
+
+            account_ref = scraped["accounts"][0].account_ref
+            secrets = crypto.encrypt(
+                json.dumps({"credentials": credentials, "long_term_token": scraped.get("long_term_token")})
+            )
+            cur = conn.execute(
+                """
+                INSERT INTO bank_connections
+                    (provider, label, account_ref, status, secrets_enc, last_synced_at, created_at)
+                VALUES (?, ?, ?, 'valid', ?, ?, ?)
+                """,
+                (payload.provider, payload.label, account_ref, secrets, _now(), _now()),
+            )
+            conn.commit()
+            connection_id = cur.lastrowid
+
+            txns = scraped["transactions_by_account"].get(account_ref, [])
+            store_transactions(conn, connection_id, txns)
+
+            row = conn.execute(
+                "SELECT * FROM bank_connections WHERE id = ?", (connection_id,)
+            ).fetchone()
+            return row_to_bank_connection(row)
+
+        else:
+            raise HTTPException(status_code=422, detail="provider must be 'psd2' or 'scraper'")
+    finally:
+        conn.close()
+
+
+@app.get("/bank/callback", response_class=HTMLResponse)
+def bank_callback(code: str, state: str):
+    conn = get_connection()
+    try:
+        connection_id = int(state)
+        connection = conn.execute(
+            "SELECT * FROM bank_connections WHERE id = ?", (connection_id,)
+        ).fetchone()
+        if not connection:
+            raise HTTPException(status_code=404, detail="Unknown bank connection")
+
+        secrets = json.loads(crypto.decrypt(connection["secrets_enc"]))
+        oauth_meta = secrets["oauth_metadata"]
+
+        client = Psd2Client()
+        settings = get_bank_settings()
+        try:
+            tokens = client.exchange_code(
+                oauth_meta, code, settings.psd2_client_id, settings.psd2_client_secret
+            )
+            consent_status = client.get_consent_status(connection["consent_id"], tokens["access_token"])
+            accounts = client.list_accounts(tokens["access_token"])
+        except (BankAuthError, BankFetchError) as e:
+            conn.execute(
+                "UPDATE bank_connections SET status = 'error', last_error = ? WHERE id = ?",
+                (str(e), connection_id),
+            )
+            conn.commit()
+            raise HTTPException(status_code=502, detail=str(e))
+
+        account_ref = accounts[0].account_ref if accounts else None
+        new_secrets = crypto.encrypt(
+            json.dumps({"access_token": tokens["access_token"], "refresh_token": tokens.get("refresh_token")})
+        )
+        conn.execute(
+            """
+            UPDATE bank_connections
+            SET status = ?, account_ref = ?, secrets_enc = ?, last_error = NULL
+            WHERE id = ?
+            """,
+            (consent_status, account_ref, new_secrets, connection_id),
+        )
+        conn.commit()
+
+        return "<html><body><h3>Bank account connected.</h3><p>You can close this tab and return to Expense Tracker.</p></body></html>"
+    finally:
+        conn.close()
+
+
+@app.delete("/bank/connections/{connection_id}", status_code=204)
+def delete_bank_connection(connection_id: int):
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM bank_connections WHERE id = ?", (connection_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Bank connection not found")
+
+        if row["provider"] == "psd2" and row["consent_id"]:
+            try:
+                secrets = json.loads(crypto.decrypt(row["secrets_enc"])) if row["secrets_enc"] else {}
+                access_token = secrets.get("access_token")
+                if access_token:
+                    Psd2Client().revoke_consent(row["consent_id"], access_token)
+            except Exception:
+                pass  # best-effort revoke; local deletion proceeds regardless
+
+        # bank_transactions rows (and expenses.bank_txn_id referencing them) must
+        # survive so already-imported expenses keep their provenance
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DELETE FROM bank_connections WHERE id = ?", (connection_id,))
+        conn.commit()
+        return None
+    finally:
+        conn.close()
+
+
+@app.post("/bank/sync", response_model=BankSyncOut)
+def bank_sync(connection_id: int, date_from: str, date_to: str):
+    conn = get_connection()
+    try:
+        try:
+            return sync_bank_transactions(conn, connection_id, date_from, date_to)
+        except BankConfigError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except BankAuthError as e:
+            raise HTTPException(status_code=401, detail=str(e))
+        except BankFetchError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+    finally:
+        conn.close()
+
+
+@app.get("/bank/transactions", response_model=list[BankTransactionOut])
+def list_bank_transactions(status: str | None = None):
+    conn = get_connection()
+    try:
+        query = BANK_TRANSACTION_JOIN_SELECT
+        params = ()
+        if status:
+            query += " WHERE t.status = ?"
+            params = (status,)
+        query += " ORDER BY t.booking_date DESC, t.id DESC"
+        rows = conn.execute(query, params).fetchall()
+        return [row_to_bank_transaction(conn, r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _approve_transaction(conn, txn_row, category_id: int, note: str | None) -> int:
+    category = conn.execute("SELECT id FROM categories WHERE id = ?", (category_id,)).fetchone()
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+
+    expense_note = note if note is not None else txn_row["counterparty"] or txn_row["description"]
+    cur = conn.execute(
+        "INSERT INTO expenses (amount, category_id, date, note, bank_txn_id) VALUES (?, ?, ?, ?, ?)",
+        (abs(txn_row["amount"]), category_id, txn_row["booking_date"], expense_note, txn_row["id"]),
+    )
+    conn.execute(
+        "UPDATE bank_transactions SET status = 'approved', expense_id = ? WHERE id = ?",
+        (cur.lastrowid, txn_row["id"]),
+    )
+    return cur.lastrowid
+
+
+@app.post("/bank/transactions/{txn_id}/approve", response_model=BankTransactionOut)
+def approve_bank_transaction(txn_id: int, payload: BankTransactionApprove):
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM bank_transactions WHERE id = ?", (txn_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Bank transaction not found")
+        if row["status"] != "pending":
+            raise HTTPException(status_code=409, detail=f"Transaction is already {row['status']}")
+
+        _approve_transaction(conn, row, payload.category_id, payload.note)
+
+        if payload.save_rule:
+            pattern = payload.rule_pattern or row["counterparty"] or row["description"]
+            if pattern:
+                conn.execute(
+                    "INSERT INTO category_rules (pattern, category_id, created_at) VALUES (?, ?, ?)",
+                    (pattern, payload.category_id, _now()),
+                )
+
+        conn.commit()
+        updated = conn.execute(
+            BANK_TRANSACTION_JOIN_SELECT + " WHERE t.id = ?", (txn_id,)
+        ).fetchone()
+        return row_to_bank_transaction(conn, updated)
+    finally:
+        conn.close()
+
+
+@app.post("/bank/transactions/{txn_id}/ignore", response_model=BankTransactionOut)
+def ignore_bank_transaction(txn_id: int):
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM bank_transactions WHERE id = ?", (txn_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Bank transaction not found")
+        if row["status"] != "pending":
+            raise HTTPException(status_code=409, detail=f"Transaction is already {row['status']}")
+
+        conn.execute("UPDATE bank_transactions SET status = 'ignored' WHERE id = ?", (txn_id,))
+        conn.commit()
+        updated = conn.execute(
+            BANK_TRANSACTION_JOIN_SELECT + " WHERE t.id = ?", (txn_id,)
+        ).fetchone()
+        return row_to_bank_transaction(conn, updated)
+    finally:
+        conn.close()
+
+
+@app.post("/bank/transactions/approve-bulk", response_model=list[BankTransactionOut])
+def approve_bank_transactions_bulk(payload: BankTransactionsBulkApprove):
+    conn = get_connection()
+    try:
+        updated_ids = []
+        for txn_id in payload.ids:
+            row = conn.execute("SELECT * FROM bank_transactions WHERE id = ?", (txn_id,)).fetchone()
+            if not row or row["status"] != "pending" or row["suggested_category_id"] is None:
+                continue
+            _approve_transaction(conn, row, row["suggested_category_id"], None)
+            updated_ids.append(txn_id)
+        conn.commit()
+
+        rows = conn.execute(
+            BANK_TRANSACTION_JOIN_SELECT + f" WHERE t.id IN ({','.join('?' * len(updated_ids))})",
+            tuple(updated_ids),
+        ).fetchall() if updated_ids else []
+        return [row_to_bank_transaction(conn, r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.get("/category-rules", response_model=list[CategoryRuleOut])
+def list_category_rules():
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT r.id, r.pattern, r.category_id, c.name AS category_name
+            FROM category_rules r
+            JOIN categories c ON c.id = r.category_id
+            ORDER BY r.id
+            """
+        ).fetchall()
+        return [row_to_category_rule(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@app.post("/category-rules", response_model=CategoryRuleOut, status_code=201)
+def create_category_rule(payload: CategoryRuleCreate):
+    conn = get_connection()
+    try:
+        category = conn.execute(
+            "SELECT id FROM categories WHERE id = ?", (payload.category_id,)
+        ).fetchone()
+        if not category:
+            raise HTTPException(status_code=404, detail="Category not found")
+
+        cur = conn.execute(
+            "INSERT INTO category_rules (pattern, category_id, created_at) VALUES (?, ?, ?)",
+            (payload.pattern, payload.category_id, _now()),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT r.id, r.pattern, r.category_id, c.name AS category_name
+            FROM category_rules r JOIN categories c ON c.id = r.category_id
+            WHERE r.id = ?
+            """,
+            (cur.lastrowid,),
+        ).fetchone()
+        return row_to_category_rule(row)
+    finally:
+        conn.close()
+
+
+@app.delete("/category-rules/{rule_id}", status_code=204)
+def delete_category_rule(rule_id: int):
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT id FROM category_rules WHERE id = ?", (rule_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Category rule not found")
+        conn.execute("DELETE FROM category_rules WHERE id = ?", (rule_id,))
         conn.commit()
         return None
     finally:
