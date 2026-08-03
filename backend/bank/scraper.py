@@ -129,11 +129,15 @@ class ScraperClient:
 
         accounts = []
         transactions_by_account: dict[str, List[NormalizedTxn]] = {}
+        card_itemized_by_account: dict[str, List[NormalizedTxn]] = {}
         for acc in data.get("accounts", []):
             account_ref = acc.get("accountNumber", "")
             accounts.append(BankAccount(account_ref=account_ref, name=account_ref))
             transactions_by_account[account_ref] = [
                 _map_transaction(t) for t in acc.get("txns", []) if t.get("status") == "completed"
+            ]
+            card_itemized_by_account[account_ref] = [
+                _map_card_itemized_transaction(t) for t in acc.get("cardItemizedCharges", [])
             ]
         return {
             "status": "success",
@@ -141,6 +145,7 @@ class ScraperClient:
             "company_id": company_id,
             "accounts": accounts,
             "transactions_by_account": transactions_by_account,
+            "card_itemized_by_account": card_itemized_by_account,
             "device_trust_data": data.get("deviceTrustData"),
         }
 
@@ -175,5 +180,20 @@ def _map_transaction(t: dict) -> NormalizedTxn:
         currency="ILS",
         counterparty=t.get("description"),
         description=t.get("memo"),
+        raw=t,
+    )
+
+
+def _map_card_itemized_transaction(t: dict) -> NormalizedTxn:
+    event_date = str(t.get("eventDate", ""))
+    debit_date = str(t.get("debitDate", ""))
+    return NormalizedTxn(
+        external_id=str(t["externalId"]),
+        booking_date=f"{event_date[:4]}-{event_date[4:6]}-{event_date[6:8]}" if len(event_date) == 8 else event_date,
+        value_date=f"{debit_date[:4]}-{debit_date[4:6]}-{debit_date[6:8]}" if len(debit_date) == 8 else debit_date or None,
+        amount=-abs(float(t.get("amount", 0))),
+        currency="ILS",
+        counterparty=t.get("merchantName"),
+        description=None,
         raw=t,
     )

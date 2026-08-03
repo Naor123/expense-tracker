@@ -1,3 +1,4 @@
+from bank.scraper import _map_card_itemized_transaction
 from bank.sync import has_matching_cross_connection_charge, store_transactions
 from bank.types import NormalizedTxn
 
@@ -199,3 +200,85 @@ def test_delayed_credit_card_charge_never_matches(conn, bank_connection):
     )
     insert_txn(conn, other, "tx-bank", "bank_transfer", "immediate", "2026-07-11", None, -100.0)
     assert has_matching_cross_connection_charge(conn, delayed_row) is False
+
+
+def test_force_kind_overrides_classification(conn, bank_connection):
+    store_transactions(conn, bank_connection, [make_txn("tx-1")], force_kind="credit_card_charge")
+    row = conn.execute("SELECT kind FROM bank_transactions WHERE external_id = 'tx-1'").fetchone()
+    assert row["kind"] == "credit_card_charge"
+
+
+def test_bulk_card_payment_pending_without_itemized_or_card_connection(conn, bank_connection):
+    store_transactions(conn, bank_connection, [make_card_payment_txn("tx-card")], "hapoalim")
+    row = conn.execute("SELECT status FROM bank_transactions WHERE external_id = 'tx-card'").fetchone()
+    assert row["status"] == "pending"
+
+
+def test_bulk_card_payment_ignored_when_itemized_charge_matches_debit_date(conn, bank_connection):
+    itemized_txn = NormalizedTxn(
+        external_id="card-1",
+        booking_date="2026-08-01",
+        value_date="2026-08-10",
+        amount=-27.0,
+        currency="ILS",
+        counterparty="HATACO",
+        raw={},
+    )
+    store_transactions(conn, bank_connection, [itemized_txn], force_kind="credit_card_charge")
+
+    payment_txn = NormalizedTxn(
+        external_id="tx-card-match",
+        booking_date="2026-07-05",
+        value_date="2026-08-10",
+        amount=-1200.0,
+        currency="ILS",
+        counterparty="MAX",
+        description="monthly card charge",
+        raw={"transactionId": "tx-card-match"},
+    )
+    store_transactions(conn, bank_connection, [payment_txn], "hapoalim")
+
+    row = conn.execute("SELECT status FROM bank_transactions WHERE external_id = 'tx-card-match'").fetchone()
+    assert row["status"] == "ignored"
+
+
+def test_bulk_card_payment_pending_when_itemized_charge_has_different_debit_date(conn, bank_connection):
+    itemized_txn = NormalizedTxn(
+        external_id="card-2",
+        booking_date="2026-08-01",
+        value_date="2026-08-10",
+        amount=-27.0,
+        currency="ILS",
+        counterparty="HATACO",
+        raw={},
+    )
+    store_transactions(conn, bank_connection, [itemized_txn], force_kind="credit_card_charge")
+
+    payment_txn = NormalizedTxn(
+        external_id="tx-card-nomatch",
+        booking_date="2026-07-05",
+        value_date="2026-08-11",
+        amount=-1200.0,
+        currency="ILS",
+        counterparty="MAX",
+        description="monthly card charge",
+        raw={"transactionId": "tx-card-nomatch"},
+    )
+    store_transactions(conn, bank_connection, [payment_txn], "hapoalim")
+
+    row = conn.execute("SELECT status FROM bank_transactions WHERE external_id = 'tx-card-nomatch'").fetchone()
+    assert row["status"] == "pending"
+
+
+def test_map_card_itemized_transaction():
+    txn = _map_card_itemized_transaction({
+        "externalId": "card-1484-6001139-20260810",
+        "merchantName": "HATACO",
+        "amount": 27.0,
+        "eventDate": "20260801",
+        "debitDate": "20260810",
+    })
+    assert txn.booking_date == "2026-08-01"
+    assert txn.value_date == "2026-08-10"
+    assert txn.amount == -27.0
+    assert txn.counterparty == "HATACO"

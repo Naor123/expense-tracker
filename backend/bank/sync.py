@@ -29,7 +29,7 @@ def _fetch_psd2(connection, date_from: str, date_to: str) -> List[NormalizedTxn]
     )
 
 
-def _fetch_scraper(conn, connection, date_from: str) -> List[NormalizedTxn]:
+def _fetch_scraper(conn, connection, date_from: str) -> tuple[List[NormalizedTxn], List[NormalizedTxn]]:
     secrets = json.loads(crypto.decrypt(connection["secrets_enc"]))
     client = ScraperClient()
     result = client.sync_login(
@@ -49,8 +49,9 @@ def _fetch_scraper(conn, connection, date_from: str) -> List[NormalizedTxn]:
 
     account_ref = connection["account_ref"]
     txns_by_account = result["transactions_by_account"]
+    card_itemized_by_account = result.get("card_itemized_by_account", {})
     if account_ref and account_ref in txns_by_account:
-        return txns_by_account[account_ref]
+        return txns_by_account[account_ref], card_itemized_by_account.get(account_ref, [])
     # No account_ref pinned yet (first sync) — take the first account and
     # persist it so subsequent syncs are pinned to the same one.
     if not account_ref and txns_by_account:
@@ -60,8 +61,8 @@ def _fetch_scraper(conn, connection, date_from: str) -> List[NormalizedTxn]:
             (first_ref, connection["id"]),
         )
         conn.commit()
-        return txns_by_account[first_ref]
-    return []
+        return txns_by_account[first_ref], card_itemized_by_account.get(first_ref, [])
+    return [], []
 
 
 def _has_active_credit_card_connection(conn, exclude_connection_id: int) -> bool:
@@ -73,6 +74,16 @@ def _has_active_credit_card_connection(conn, exclude_connection_id: int) -> bool
         LIMIT 1
         """,
         (exclude_connection_id, *CREDIT_CARD_COMPANY_IDS),
+    ).fetchone()
+    return row is not None
+
+
+def _has_itemized_charge_for_debit_date(conn, connection_id: int, value_date: Optional[str]) -> bool:
+    if not value_date:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM bank_transactions WHERE connection_id = ? AND kind = 'credit_card_charge' AND value_date = ? LIMIT 1",
+        (connection_id, value_date),
     ).fetchone()
     return row is not None
 
@@ -106,12 +117,15 @@ def has_matching_cross_connection_charge(conn, row) -> bool:
     return match is not None
 
 
-def store_transactions(conn, connection_id: int, txns: List[NormalizedTxn], company_id: Optional[str] = None) -> dict:
+def store_transactions(
+    conn, connection_id: int, txns: List[NormalizedTxn], company_id: Optional[str] = None,
+    force_kind: Optional[str] = None,
+) -> dict:
     """Dedupe-insert NormalizedTxns into bank_transactions. Shared by sync_bank_transactions
     and the scraper's connect flow (which already has a batch of txns from its first login)."""
     inserted = 0
     for txn in txns:
-        kind = classify_transaction(txn.counterparty, txn.description, company_id)
+        kind = force_kind or classify_transaction(txn.counterparty, txn.description, company_id)
         settlement = classify_settlement(txn.booking_date, txn.value_date)
         if txn.amount > 0:
             if kind == "bank_transfer" and match_salary_rule(conn, txn.counterparty):
@@ -123,9 +137,13 @@ def store_transactions(conn, connection_id: int, txns: List[NormalizedTxn], comp
                 status = "pending"
             else:
                 status = "ignored"  # card-side credits (refunds etc.)
-        elif kind == "credit_card_payment" and _has_active_credit_card_connection(conn, connection_id):
+        elif kind == "credit_card_payment" and (
+            _has_active_credit_card_connection(conn, connection_id)
+            or _has_itemized_charge_for_debit_date(conn, connection_id, txn.value_date)
+        ):
             # Same spending as the itemized credit_card_charge rows from the card
-            # connection — counting both would double it.
+            # connection (or from itemized data on this same connection) — counting
+            # both would double it.
             status = "ignored"
         else:
             status = "pending"
@@ -159,8 +177,9 @@ def sync_bank_transactions(conn, connection_id: int, date_from: str, date_to: st
     try:
         if connection["provider"] == "psd2":
             txns = _fetch_psd2(connection, date_from, date_to)
+            card_itemized_txns = []
         elif connection["provider"] == "scraper":
-            txns = _fetch_scraper(conn, connection, date_from)
+            txns, card_itemized_txns = _fetch_scraper(conn, connection, date_from)
         else:
             raise BankConfigError(f"unknown provider {connection['provider']}")
     except (BankAuthError, BankFetchError, BankConfigError) as e:
@@ -171,7 +190,17 @@ def sync_bank_transactions(conn, connection_id: int, date_from: str, date_to: st
         conn.commit()
         raise
 
-    result = store_transactions(conn, connection_id, txns, connection["company_id"])
+    # Itemized charges must be inserted first so the bulk credit_card_payment
+    # line's auto-ignore check (_has_itemized_charge_for_debit_date) can find them.
+    itemized_result = store_transactions(
+        conn, connection_id, card_itemized_txns, connection["company_id"], force_kind="credit_card_charge"
+    )
+    regular_result = store_transactions(conn, connection_id, txns, connection["company_id"])
+    result = {
+        "fetched": itemized_result["fetched"] + regular_result["fetched"],
+        "inserted": itemized_result["inserted"] + regular_result["inserted"],
+        "skipped": itemized_result["skipped"] + regular_result["skipped"],
+    }
 
     conn.execute(
         "UPDATE bank_connections SET status = 'valid', last_synced_at = ?, last_error = NULL WHERE id = ?",

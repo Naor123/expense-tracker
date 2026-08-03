@@ -64,7 +64,11 @@ async function main() {
     process.exit(1);
   }
 
-  emit({ success: true, accounts: result.accounts, deviceTrustData: result.deviceTrustData });
+  const accounts = result.accounts.map((acc) => ({
+    ...acc,
+    cardItemizedCharges: acc.cardItemizedCharges || [],
+  }));
+  emit({ success: true, accounts, deviceTrustData: result.deviceTrustData });
 }
 
 main()

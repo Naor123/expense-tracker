@@ -489,6 +489,8 @@ def _create_scraper_connection(conn, label: str, company_id: str, credentials: d
     conn.commit()
     connection_id = cur.lastrowid
 
+    card_itemized_txns = scraped.get("card_itemized_by_account", {}).get(account_ref, [])
+    store_transactions(conn, connection_id, card_itemized_txns, company_id, force_kind="credit_card_charge")
     txns = scraped["transactions_by_account"].get(account_ref, [])
     store_transactions(conn, connection_id, txns, company_id)
 
@@ -517,6 +519,10 @@ def _update_scraper_connection(conn, connection_id: int, scraped: dict) -> dict:
     )
     conn.commit()
 
+    card_itemized_txns = scraped.get("card_itemized_by_account", {}).get(account_ref, [])
+    store_transactions(
+        conn, connection_id, card_itemized_txns, scraped.get("company_id"), force_kind="credit_card_charge"
+    )
     txns = scraped["transactions_by_account"].get(account_ref, [])
     store_transactions(conn, connection_id, txns, scraped.get("company_id"))
 

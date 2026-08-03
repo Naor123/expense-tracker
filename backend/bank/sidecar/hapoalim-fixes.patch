@@ -1,8 +1,92 @@
 diff --git a/src/scrapers/hapoalim.ts b/src/scrapers/hapoalim.ts
-index 232b99c..3d1209c 100644
+index 232b99c..be60b1d 100644
 --- a/src/scrapers/hapoalim.ts
 +++ b/src/scrapers/hapoalim.ts
-@@ -266,6 +266,11 @@ function getPossibleLoginResults(baseUrl: string) {
+@@ -5,7 +5,13 @@ import { getDebug } from '../helpers/debug';
+ import { fetchGetWithinPage, fetchPostWithinPage } from '../helpers/fetch';
+ import { getCurrentUrl } from '../helpers/navigation';
+ import { sleep, waitUntil } from '../helpers/waiting';
+-import { type Transaction, TransactionStatuses, TransactionTypes, type TransactionsAccount } from '../transactions';
++import {
++  type CardItemizedCharge,
++  type Transaction,
++  TransactionStatuses,
++  TransactionTypes,
++  type TransactionsAccount,
++} from '../transactions';
+ import { BaseScraperWithBrowser, LoginResults, type PossibleLoginResults } from './base-scraper-with-browser';
+ import { ScraperErrorTypes } from './errors';
+ import { type ScraperLoginResult, type ScraperOptions } from './interface';
+@@ -201,6 +207,49 @@ async function getAccountBalance(apiSiteUrl: string, page: Page, accountNumber:
+   return balanceAndCreditLimit?.currentBalance;
+ }
+ 
++async function fetchCardItemizedCharges(
++  apiSiteUrl: string,
++  page: Page,
++  accountNumber: string,
++): Promise<CardItemizedCharge[]> {
++  const totalsUrl = `${apiSiteUrl}/cards/transactions-totals?accountId=${accountNumber}&transactionsType=current&lang=he`;
++  const totals = await fetchGetWithinPage<any>(page, totalsUrl);
++  const cards = (totals?.cards ?? []).filter((c: any) => c.cardIdentification?.nonBankCardInd === false);
++
++  const charges: CardItemizedCharge[] = [];
++  for (const card of cards) {
++    const ident = card.cardIdentification;
++    const balances = card.cardBookedBalances ?? {};
++    const groups: { list: any[]; origin: number }[] = [
++      { list: balances.nationalTransactionsTotal ?? [], origin: 1 },
++      { list: balances.internationalTransactionsTotal ?? [], origin: 2 },
++    ];
++    for (const { list, origin } of groups) {
++      for (const total of list) {
++        const debitDate = total.debitDate;
++        const detailUrl =
++          `${apiSiteUrl}/cards/transactions?accountId=${accountNumber}` +
++          `&cardSuffix=${ident.cardSuffix}&cardIssuingSPCode=${ident.cardIssuingSPCode}` +
++          `&cardIdServiceProvider=${ident.cardIdServiceProvider}&transactionsType=current&totalInd=1` +
++          `&debitDate=${debitDate}&eventCurrencyDescription=NIS&debitEventOrigin=${origin}` +
++          `&offset=0&limit=50&cardIdHapoalim=${ident.cardIdHapoalim}&lang=he`;
++        const detail = await fetchGetWithinPage<any>(page, detailUrl);
++        const txnGroup = origin === 1 ? detail?.card?.nationalTransactions : detail?.card?.internationalTransactions;
++        for (const t of txnGroup?.[0]?.transactionsDetails ?? []) {
++          charges.push({
++            externalId: `card-${ident.cardSuffix}-${t.transactionRreferance}-${debitDate}`,
++            merchantName: t.merchantDetails?.merchantName ?? null,
++            amount: t.currencyAmount?.amount ?? 0,
++            eventDate: t.eventDate,
++            debitDate: t.debitDate,
++          });
++        }
++      }
++    }
++  }
++  return charges;
++}
++
+ async function fetchAccountData(page: Page, baseUrl: string, options: ScraperOptions) {
+   const restContext = await getRestContext(page);
+   const apiSiteUrl = `${baseUrl}/${restContext}`;
+@@ -241,10 +290,18 @@ async function fetchAccountData(page: Page, baseUrl: string, options: ScraperOpt
+       options,
+     );
+ 
++    let cardItemizedCharges: CardItemizedCharge[] = [];
++    try {
++      cardItemizedCharges = await fetchCardItemizedCharges(apiSiteUrl, page, accountNumber);
++    } catch (e) {
++      debug('failed to fetch card itemized charges for account %s: %s', accountNumber, e);
++    }
++
+     accounts.push({
+       accountNumber,
+       balance,
+       txns,
++      cardItemizedCharges,
+     });
+   }
+ 
+@@ -266,6 +323,11 @@ function getPossibleLoginResults(baseUrl: string) {
      `${baseUrl}/portalserver/HomePage`,
      `${baseUrl}/ng-portals-bt/rb/he/homepage`,
      `${baseUrl}/ng-portals/rb/he/homepage`,
@@ -14,7 +98,7 @@ index 232b99c..3d1209c 100644
    ];
    urls[LoginResults.InvalidPassword] = [
      `${baseUrl}/AUTHENTICATE/LOGON?flow=AUTHENTICATE&state=LOGON&errorcode=1.6&callme=false`,
-@@ -328,10 +333,53 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
+@@ -328,10 +390,53 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
      };
    }
  
@@ -69,7 +153,7 @@ index 232b99c..3d1209c 100644
        return result;
      }
  
-@@ -391,11 +439,14 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
+@@ -391,11 +496,14 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
        }
  
        if (!(await this.page.$(OTP_FORM_SELECTOR))) {
@@ -85,7 +169,7 @@ index 232b99c..3d1209c 100644
          ];
          try {
            await waitUntil(
-@@ -409,6 +460,14 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
+@@ -409,6 +517,14 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
              1000,
            );
            debug('OTP verification succeeded');
@@ -100,3 +184,25 @@ index 232b99c..3d1209c 100644
            return { success: true };
          } catch {
            const current = await getCurrentUrl(this.page, true);
+diff --git a/src/transactions.ts b/src/transactions.ts
+index f07a175..ebd6133 100644
+--- a/src/transactions.ts
++++ b/src/transactions.ts
+@@ -2,8 +2,17 @@ export interface TransactionsAccount {
+   accountNumber: string;
+   balance?: number;
+   txns: Transaction[];
++  cardItemizedCharges?: CardItemizedCharge[];
+ }
+ 
++export type CardItemizedCharge = {
++  externalId: string;
++  merchantName: string | null;
++  amount: number;
++  eventDate: string;
++  debitDate: string;
++};
++
+ export enum TransactionTypes {
+   Normal = 'normal',
+   Installments = 'installments',
