@@ -219,8 +219,14 @@ function App() {
   }
 
   async function handleSyncBank(connectionId, dateFrom, dateTo) {
-    await syncBank(connectionId, dateFrom, dateTo)
-    await Promise.all([loadBankConnections(), loadPendingTxns()])
+    try {
+      await syncBank(connectionId, dateFrom, dateTo)
+    } finally {
+      // Refetch even on failure — a failed sync (e.g. OTP_REQUIRED) flips the
+      // connection's status to 'error' server-side, which is what makes the
+      // reconnect button appear.
+      await Promise.all([loadBankConnections(), loadPendingTxns()])
+    }
   }
 
   async function handleApproveBankTxn(id, data) {
