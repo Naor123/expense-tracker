@@ -1,5 +1,5 @@
 diff --git a/src/scrapers/hapoalim.ts b/src/scrapers/hapoalim.ts
-index 232b99c..d3f4609 100644
+index 232b99c..3d1209c 100644
 --- a/src/scrapers/hapoalim.ts
 +++ b/src/scrapers/hapoalim.ts
 @@ -266,6 +266,11 @@ function getPossibleLoginResults(baseUrl: string) {
@@ -14,7 +14,35 @@ index 232b99c..d3f4609 100644
    ];
    urls[LoginResults.InvalidPassword] = [
      `${baseUrl}/AUTHENTICATE/LOGON?flow=AUTHENTICATE&state=LOGON&errorcode=1.6&callme=false`,
-@@ -331,7 +336,20 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
+@@ -328,10 +333,53 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
+     };
+   }
+ 
++  async runCurrentDebitDiagnostic() {
++    const fs = await import('fs');
++    const captured: { url: string; status: number; body: string }[] = [];
++    let navError: string | null = null;
++    this.page.on('response', res => {
++      const url = res.url();
++      if (/current-debit|plastic|creditcard|card/i.test(url)) {
++        res
++          .text()
++          .then(body => captured.push({ url, status: res.status(), body }))
++          .catch(() => {});
++      }
++    });
++    try {
++      await this.page.goto(`${this.baseUrl}/ng-portals/rb/he/plastic-cards/current-debit`, {
++        waitUntil: 'load',
++      });
++      await sleep(5000);
++    } catch (e) {
++      navError = e instanceof Error ? e.message : String(e);
++    }
++    fs.writeFileSync('current-debit-diagnostic.json', JSON.stringify({ navError, captured }, null, 2));
++    debug('wrote %d captured responses to current-debit-diagnostic.json (navError=%s)', captured.length, navError);
++  }
++
    async login(credentials: ScraperSpecificCredentials): Promise<ScraperLoginResult> {
      const result = await super.login(credentials);
  
@@ -29,6 +57,11 @@ index 232b99c..d3f4609 100644
 +        debug('logged in on a non-homepage page (%s), navigating to homepage', current);
 +        await this.navigateTo(`${this.baseUrl}/ng-portals/rb/he/homepage`);
 +      }
++
++      if (process.env.DIAGNOSE_CURRENT_DEBIT === '1') {
++        await this.runCurrentDebitDiagnostic();
++      }
++
 +      return result;
 +    }
 +
@@ -36,3 +69,34 @@ index 232b99c..d3f4609 100644
        return result;
      }
  
+@@ -391,11 +439,14 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
+       }
+ 
+       if (!(await this.page.$(OTP_FORM_SELECTOR))) {
+-        // OTP form closed — wait for the bank to navigate to homepage
++        // OTP form closed — wait for the bank to navigate away from the OTP page.
++        // Same deep-page caveat as the non-OTP login path above: a session can
++        // land on current-account/transactions instead of the homepage.
+         const successPatterns = [
+           '/portalserver/HomePage',
+           '/ng-portals-bt/rb/he/homepage',
+           '/ng-portals/rb/he/homepage',
++          '/ng-portals/rb/he/current-account/transactions',
+         ];
+         try {
+           await waitUntil(
+@@ -409,6 +460,14 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
+             1000,
+           );
+           debug('OTP verification succeeded');
++          const current = await getCurrentUrl(this.page, true);
++          if (!current.includes('/homepage') && !current.includes('/HomePage')) {
++            debug('OTP success landed on a non-homepage page (%s), navigating to homepage', current);
++            await this.navigateTo(`${this.baseUrl}/ng-portals/rb/he/homepage`);
++          }
++          if (process.env.DIAGNOSE_CURRENT_DEBIT === '1') {
++            await this.runCurrentDebitDiagnostic();
++          }
+           return { success: true };
+         } catch {
+           const current = await getCurrentUrl(this.page, true);
