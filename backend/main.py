@@ -239,13 +239,22 @@ def create_expense(payload: ExpenseCreate):
 def delete_expense(expense_id: int):
     conn = get_connection()
     try:
-        row = conn.execute("SELECT id FROM expenses WHERE id = ?", (expense_id,)).fetchone()
+        row = conn.execute("SELECT id, bank_txn_id FROM expenses WHERE id = ?", (expense_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Expense not found")
-        # recurring_generated / bank_transactions rows may reference this expense
+        # rent_generated / bank_transactions rows may reference this expense
         # and must survive the delete (same FK relaxation as delete_recurring_bill)
         conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+        if row["bank_txn_id"] is not None:
+            # Otherwise the transaction is stuck: not in expenses (deleted) and
+            # not in the review queue either (status stayed 'approved'), so a
+            # resync silently does nothing — INSERT OR IGNORE no-ops since the
+            # row already exists.
+            conn.execute(
+                "UPDATE bank_transactions SET status = 'pending', expense_id = NULL WHERE id = ?",
+                (row["bank_txn_id"],),
+            )
         conn.commit()
         return None
     finally:
