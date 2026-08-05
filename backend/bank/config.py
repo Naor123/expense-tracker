@@ -6,7 +6,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class BankSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    bank_provider: str = "psd2"
     bank_enc_key: Optional[str] = None
 
     psd2_base_url: str = "http://localhost:8010"

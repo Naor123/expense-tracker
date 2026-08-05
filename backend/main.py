@@ -22,6 +22,7 @@ from bank.sync import (
 )
 from bank.types import NormalizedTxn
 from db import (
+    bucket_month,
     clear_salary_for_month,
     current_bucket_month,
     get_connection,

@@ -20,8 +20,6 @@ export const deleteExpense = (id) => api.delete(`/expenses/${id}`)
 export const getSummary = (month) =>
   api.get('/summary', { params: { month } }).then((r) => r.data)
 
-export const getMonths = () => api.get('/months').then((r) => r.data)
-
 export const sendInsightsEmail = (month) =>
   api.post('/insights/send-email', null, { params: { month } }).then((r) => r.data)
 
@@ -51,12 +49,8 @@ export const getBankTransactions = (status, month) =>
   api.get('/bank/transactions', { params: { status, month } }).then((r) => r.data)
 export const restoreBankTransaction = (id) =>
   api.post(`/bank/transactions/${id}/restore`).then((r) => r.data)
-export const backfillBankTransactions = (month) =>
-  api.post('/bank/backfill', null, { params: { month } }).then((r) => r.data)
 
 export const getCategoryRules = () => api.get('/category-rules').then((r) => r.data)
-export const createCategoryRule = (pattern, categoryId) =>
-  api.post('/category-rules', { pattern, category_id: categoryId }).then((r) => r.data)
 export const deleteCategoryRule = (id) => api.delete(`/category-rules/${id}`)
 
 export default api

@@ -7,7 +7,7 @@ from typing import List, Optional
 import httpx
 
 from bank.config import BankSettings, get_bank_settings
-from bank.errors import BankAuthError, BankConfigError, BankFetchError
+from bank.errors import BankAuthError, BankFetchError
 from bank.types import BankAccount, NormalizedTxn
 
 # BOI's NextGenPSD2 profile supports only the OAuth SCA Approach (the plain
