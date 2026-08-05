@@ -1,4 +1,9 @@
 :root {
+  /* Without this, the browser renders native popups (select dropdown lists,
+     scrollbars, etc.) with the OS default light scheme regardless of our
+     theme -- in dark mode that meant a white dropdown with light inherited
+     text, unreadable. This tells the browser which palette to match. */
+  color-scheme: light;
   --color-bg: #f5f6f8;
   --color-surface: #ffffff;
   --color-surface-alt: #f0f1f4;
@@ -17,6 +22,7 @@
 }
 
 [data-theme='dark'] {
+  color-scheme: dark;
   --color-bg: #14161c;
   --color-surface: #1d2027;
   --color-surface-alt: #262a33;
