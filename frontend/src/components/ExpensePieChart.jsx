@@ -2,6 +2,10 @@ import { useState } from 'react'
 import { Pencil } from 'lucide-react'
 import { PieChart, Pie, Cell, Legend, Tooltip, ResponsiveContainer } from 'recharts'
 
+function formatCurrency(amount) {
+  return amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
 export default function ExpensePieChart({ summary }) {
   const [label, setLabel] = useState('total this month')
   const [editingLabel, setEditingLabel] = useState(false)
@@ -40,7 +44,7 @@ export default function ExpensePieChart({ summary }) {
     <div className="card">
       <h2 className="card-title">Spending Breakdown</h2>
       <div className="summary-total">
-        <div className="summary-total-amount">₪{summary.total.toFixed(2)}</div>
+        <div className="summary-total-amount">₪{formatCurrency(summary.total)}</div>
         {editingLabel ? (
           <input
             className="summary-total-label-input"
@@ -61,8 +65,8 @@ export default function ExpensePieChart({ summary }) {
         )}
         {pendingSettlement > 0 && (
           <div className="summary-settlement-breakdown">
-            <span>₪{alreadySpent.toFixed(2)} already left your account</span>
-            <span>₪{pendingSettlement.toFixed(2)} due by the 10th</span>
+            <span>₪{formatCurrency(alreadySpent)} already left your account</span>
+            <span>₪{formatCurrency(pendingSettlement)} due by the 10th</span>
           </div>
         )}
       </div>
@@ -84,7 +88,7 @@ export default function ExpensePieChart({ summary }) {
           </Pie>
           <Tooltip
             formatter={(value, name, props) => [
-              `₪${value.toFixed(2)} (${props.payload.percent.toFixed(1)}%)`,
+              `₪${formatCurrency(value)} (${props.payload.percent.toFixed(1)}%)`,
               name,
             ]}
           />

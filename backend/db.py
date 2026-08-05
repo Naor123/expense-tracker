@@ -10,12 +10,12 @@ load_dotenv()
 DB_PATH = os.getenv("DB_PATH", "expenses.db")
 
 SEED_CATEGORIES = [
-    ("Bills", "#FF6B6B"),
-    ("Shopping", "#4D96FF"),
-    ("Car", "#FFD93D"),
-    ("Entertainment", "#6BCB77"),
-    ("Going Out", "#FF8C42"),
-    ("Uncategorized", "#9CA3AF"),
+    ("Bills", "#F43F5E"),
+    ("Shopping", "#3B82F6"),
+    ("Car", "#F59E0B"),
+    ("Entertainment", "#8B5CF6"),
+    ("Going Out", "#F97316"),
+    ("Uncategorized", "#94A3B8"),
 ]
 
 # Everything except Rent comes from the bank/card sync now. Rent is the one
