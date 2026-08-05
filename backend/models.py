@@ -34,6 +34,7 @@ class ExpenseOut(BaseModel):
     note: Optional[str] = None
     is_rent: bool = False
     bank_txn_id: Optional[int] = None
+    settlement: Optional[str] = None
 
 
 class SummaryCategory(BaseModel):
@@ -129,6 +130,7 @@ class BankTransactionOut(BaseModel):
     settlement: str
     suggested_category_id: Optional[int] = None
     suggested_category_name: Optional[str] = None
+    current_category_name: Optional[str] = None
     expense_id: Optional[int] = None
     ignore_reason: Optional[str] = None
     connection_company_id: Optional[str] = None

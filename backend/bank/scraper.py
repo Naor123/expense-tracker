@@ -5,11 +5,29 @@ import subprocess
 import threading
 import time
 import uuid
+from datetime import datetime
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 from bank.config import BankSettings, get_bank_settings
 from bank.errors import BankAuthError, BankFetchError
 from bank.types import BankAccount, NormalizedTxn
+
+_ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
+
+
+def _local_date(iso_timestamp: str) -> str:
+    """The scraper (Node, via moment().toISOString()) parses each transaction's
+    date as Israel local time then serializes it to UTC — a purchase at Israel
+    midnight arrives here as '...T21:00:00.000Z' (9pm the PREVIOUS UTC day).
+    Slicing the first 10 chars reads off the UTC calendar date, not the Israel
+    one, which put every scraped transaction's booking_date one day behind the
+    real date, unconditionally (Israel midnight always falls on the prior UTC
+    day). Must convert back to Israel local time before taking the date part."""
+    if not iso_timestamp:
+        return ""
+    normalized = iso_timestamp.replace("Z", "+00:00")
+    return datetime.fromisoformat(normalized).astimezone(_ISRAEL_TZ).date().isoformat()
 
 _SIDECAR_DIR = os.path.join(os.path.dirname(__file__), "sidecar")
 _SIDECAR_SCRIPT = os.path.join(_SIDECAR_DIR, "scrape.mjs")
@@ -174,8 +192,8 @@ def _map_transaction(t: dict) -> NormalizedTxn:
         identifier = f"{t.get('date')}-{t.get('chargedAmount')}-{t.get('description')}"
     return NormalizedTxn(
         external_id=str(identifier),
-        booking_date=str(t.get("date", ""))[:10],
-        value_date=str(t.get("processedDate", ""))[:10] or None,
+        booking_date=_local_date(str(t.get("date", ""))),
+        value_date=_local_date(str(t.get("processedDate", ""))) or None,
         amount=float(t.get("chargedAmount", 0)),
         currency="ILS",
         counterparty=t.get("description"),

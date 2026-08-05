@@ -43,9 +43,24 @@ def classify_transaction(counterparty: str, description: str, company_id: str, s
 
 def classify_settlement(booking_date: str, value_date: str | None) -> str:
     """Returns 'immediate' (settles within days — typically foreign-currency
-    purchases) or 'delayed' (rides the card company's ~10th-of-next-month lump
-    sum) based on whether value_date crosses into a later calendar month than
-    booking_date."""
-    if not value_date:
+    purchases) or 'delayed' (rides the card company's ~9th/10th-of-next-month
+    lump sum).
+
+    A month-crossing value_date is the obvious case. But a purchase made late
+    enough in the month still rides that same bulk cycle even though its
+    booking_date and value_date land in the *same* calendar month (e.g. bought
+    Aug 1, cycle closes Aug 10 — both August) — a pure month comparison missed
+    every one of these in the real data. The reliable signal turned out to be
+    value_date's day-of-month itself: every observed delayed charge settles on
+    the 9th or 10th (the cycle's close, shifted a day for weekends/holidays),
+    and no genuinely fast-settling charge ever lands there.
+
+    That day check only applies when there's an actual settlement gap —
+    booking_date == value_date (true of every plain bank_transfer row; there's
+    no card cycle to ride) stays 'immediate' even if that shared date happens
+    to be the 9th or 10th, which is coincidence, not signal."""
+    if not value_date or value_date == booking_date:
         return "immediate"
-    return "delayed" if value_date[:7] > booking_date[:7] else "immediate"
+    if value_date[:7] > booking_date[:7]:
+        return "delayed"
+    return "delayed" if value_date[8:10] in ("09", "10") else "immediate"

@@ -35,3 +35,20 @@ def test_settlement_crossing_into_next_month_is_delayed():
 
 def test_settlement_with_no_value_date_is_immediate():
     assert classify_settlement("2026-07-11", None) == "immediate"
+
+
+def test_late_month_purchase_settling_on_the_9th_or_10th_is_delayed_even_within_the_same_month():
+    # Bought Aug 1, cycle closes Aug 10 -- both August, so a pure month
+    # comparison misses that this rides the same bulk cycle as everything else.
+    assert classify_settlement("2026-08-01", "2026-08-10") == "delayed"
+    assert classify_settlement("2026-08-03", "2026-08-09") == "delayed"
+
+
+def test_short_gap_settlement_near_the_9th_is_still_immediate_if_not_exactly_on_it():
+    assert classify_settlement("2026-07-06", "2026-07-08") == "immediate"
+
+
+def test_same_day_settlement_on_the_9th_is_immediate_not_delayed():
+    # A plain bank_transfer's booking_date == value_date is a coincidence of
+    # calendar, not a sign it's riding the card cycle -- there's no gap at all.
+    assert classify_settlement("2026-07-09", "2026-07-09") == "immediate"

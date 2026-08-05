@@ -111,7 +111,8 @@ export default function ExpenseList({ expenses, categories, onDelete, onRecatego
 
   const sortFn = (a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id)
   const rent = expenses.filter((e) => e.is_rent).sort(sortFn)
-  const imported = expenses.filter((e) => e.bank_txn_id).sort(sortFn)
+  const direct = expenses.filter((e) => e.bank_txn_id && e.settlement === 'immediate').sort(sortFn)
+  const delayed = expenses.filter((e) => e.bank_txn_id && e.settlement === 'delayed').sort(sortFn)
   const other = expenses.filter((e) => !e.is_rent && !e.bank_txn_id).sort(sortFn)
 
   return (
@@ -125,14 +126,25 @@ export default function ExpenseList({ expenses, categories, onDelete, onRecatego
         emptyText="No rent expense for this month."
         defaultExpanded={false}
       />
-      {imported.length > 0 && (
+      {direct.length > 0 && (
         <CollapsibleGroup
-          title="Imported from Bank"
-          items={imported}
+          title="Direct Charges"
+          items={direct}
           categories={categories}
           onDelete={onDelete}
           onRecategorize={onRecategorize}
-          emptyText="No imported transactions for this month."
+          emptyText="No direct charges for this month."
+          defaultExpanded={true}
+        />
+      )}
+      {delayed.length > 0 && (
+        <CollapsibleGroup
+          title="Delayed Charges"
+          items={delayed}
+          categories={categories}
+          onDelete={onDelete}
+          onRecategorize={onRecategorize}
+          emptyText="No delayed charges for this month."
           defaultExpanded={true}
         />
       )}

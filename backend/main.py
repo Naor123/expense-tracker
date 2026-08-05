@@ -99,14 +99,17 @@ def row_to_expense(row) -> dict:
         "note": row["note"],
         "is_rent": bool(row["is_rent"]),
         "bank_txn_id": row["bank_txn_id"],
+        "settlement": row["settlement"],
     }
 
 
 EXPENSE_JOIN_SELECT = """
     SELECT e.id, e.amount, e.category_id, c.name AS category_name,
-           c.color AS category_color, e.date, e.note, e.is_rent, e.bank_txn_id
+           c.color AS category_color, e.date, e.note, e.is_rent, e.bank_txn_id,
+           bt.settlement AS settlement
     FROM expenses e
     JOIN categories c ON c.id = e.category_id
+    LEFT JOIN bank_transactions bt ON bt.id = e.bank_txn_id
 """
 
 
@@ -461,10 +464,13 @@ BANK_TRANSACTION_JOIN_SELECT = """
     SELECT t.id, t.connection_id, t.external_id, t.booking_date, t.value_date, t.amount,
            t.currency, t.counterparty, t.description, t.status, t.kind, t.settlement,
            t.suggested_category_id, t.expense_id, t.ignore_reason, c.name AS suggested_category_name,
-           bc.company_id AS connection_company_id, bc.label AS connection_label
+           bc.company_id AS connection_company_id, bc.label AS connection_label,
+           cat_current.name AS current_category_name
     FROM bank_transactions t
     LEFT JOIN categories c ON c.id = t.suggested_category_id
     LEFT JOIN bank_connections bc ON bc.id = t.connection_id
+    LEFT JOIN expenses ex ON ex.id = t.expense_id
+    LEFT JOIN categories cat_current ON cat_current.id = ex.category_id
 """
 
 
@@ -484,6 +490,7 @@ def row_to_bank_transaction(conn, row) -> dict:
         "settlement": row["settlement"],
         "suggested_category_id": row["suggested_category_id"],
         "suggested_category_name": row["suggested_category_name"],
+        "current_category_name": row["current_category_name"],
         "expense_id": row["expense_id"],
         "ignore_reason": row["ignore_reason"],
         "connection_company_id": row["connection_company_id"],

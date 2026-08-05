@@ -55,6 +55,9 @@ export default function ImportActivityModal({ transactions, onRestore, onClose }
   const imported = transactions.filter((t) => t.status === 'imported')
   const ignored = transactions.filter((t) => t.status === 'ignored')
 
+  const uncategorized = imported.filter((t) => t.current_category_name === 'Uncategorized')
+  const categorized = imported.filter((t) => t.current_category_name !== 'Uncategorized')
+
   const pendingSettlementTotal = imported
     .filter((t) => t.kind === 'credit_card_charge' && t.settlement === 'delayed')
     .reduce((sum, t) => sum + Math.abs(t.amount), 0)
@@ -110,7 +113,35 @@ export default function ImportActivityModal({ transactions, onRestore, onClose }
           </>
         )}
 
-        {imported.length > 0 && (
+        {uncategorized.length > 0 && (
+          <>
+            <h3 className="card-title">Uncategorized</h3>
+            <div className="recurring-bills-list">
+              {uncategorized.map((txn) => (
+                <div key={txn.id} className="recurring-bill-row bank-uncategorized-row">
+                  <div className="recurring-bill-main">
+                    <div className="recurring-bill-top">
+                      <span className="recurring-bill-name">{txn.counterparty || 'Unknown'}</span>
+                      <span className="recurring-bill-amount">₪{Math.abs(txn.amount).toFixed(2)}</span>
+                      <KindBadge txn={txn} />
+                      {txn.kind === 'credit_card_charge' && txn.settlement === 'delayed' && (
+                        <span
+                          className="bank-settlement-badge"
+                          title="Settles as part of next month's card lump sum"
+                        >
+                          <Clock size={12} /> Settles {formatDate(txn.value_date)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="recurring-bill-schedule">{sourceLine(txn)}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {categorized.length > 0 && (
           <>
             <h3 className="card-title">Imported</h3>
             {pendingSettlementTotal > 0 && (
@@ -121,12 +152,17 @@ export default function ImportActivityModal({ transactions, onRestore, onClose }
               </div>
             )}
             <div className="recurring-bills-list">
-              {imported.map((txn) => (
+              {categorized.map((txn) => (
                 <div key={txn.id} className="recurring-bill-row">
                   <div className="recurring-bill-main">
                     <div className="recurring-bill-top">
                       <span className="recurring-bill-name">{txn.counterparty || 'Unknown'}</span>
                       <span className="recurring-bill-amount">₪{Math.abs(txn.amount).toFixed(2)}</span>
+                      {txn.current_category_name && (
+                        <span className="bank-kind-badge bank-category-badge">
+                          {txn.current_category_name}
+                        </span>
+                      )}
                       <KindBadge txn={txn} />
                       {txn.kind === 'credit_card_charge' && txn.settlement === 'delayed' && (
                         <span
