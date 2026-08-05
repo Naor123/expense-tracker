@@ -57,3 +57,54 @@ def test_deleting_a_generated_rent_expense_is_not_recreated(conn):
 
     still_gone = conn.execute("SELECT id FROM expenses WHERE id = ?", (row["id"],)).fetchone()
     assert still_gone is None
+
+
+def _insert_rent_txn(conn, booking_date):
+    conn.execute(
+        """
+        INSERT INTO bank_connections (provider, label, status, created_at)
+        VALUES ('scraper', 'Test Bank', 'valid', '2026-01-01')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO bank_transactions
+            (connection_id, external_id, booking_date, value_date, amount, currency,
+             counterparty, description, raw_json, status, kind, settlement, created_at)
+        VALUES (1, 'rent-1', ?, ?, ?, 'ILS', 'הוראת-קבע', '', '{}', 'new', 'bank_transfer', 'immediate', '2026-01-01T00:00:00+00:00')
+        """,
+        (booking_date, booking_date, -float(db.RENT_AMOUNT)),
+    )
+    conn.commit()
+
+
+def test_sync_rent_uses_the_real_transaction_date_when_already_synced(conn):
+    _insert_rent_txn(conn, "2026-07-31")
+    db.sync_rent(conn)
+
+    row = conn.execute(
+        "SELECT e.date FROM expenses e JOIN rent_generated rg ON rg.expense_id = e.id WHERE rg.month = '2026-07'"
+    ).fetchone()
+    assert row["date"] == "2026-07-31"
+
+
+def test_sync_rent_backfills_the_real_date_once_it_arrives_later(conn):
+    db.sync_rent(conn)  # first run: no real transaction yet, placeholder date
+    placeholder = conn.execute(
+        "SELECT e.date FROM expenses e JOIN rent_generated rg ON rg.expense_id = e.id WHERE rg.month = '2026-07'"
+    ).fetchone()
+    assert placeholder["date"] == "2026-07-10"
+
+    _insert_rent_txn(conn, "2026-07-31")
+    db.sync_rent(conn)  # second run: real transaction now visible
+
+    updated = conn.execute(
+        "SELECT e.date FROM expenses e JOIN rent_generated rg ON rg.expense_id = e.id WHERE rg.month = '2026-07'"
+    ).fetchone()
+    assert updated["date"] == "2026-07-31"
+
+
+def test_last_calendar_day_of_month():
+    assert db.last_calendar_day_of_month("2026-07") == "2026-07-31"
+    assert db.last_calendar_day_of_month("2026-02") == "2026-02-28"
+    assert db.last_calendar_day_of_month("2026-12") == "2026-12-31"

@@ -1,7 +1,7 @@
 import os
 import re
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 
 from dotenv import load_dotenv
 
@@ -278,6 +278,19 @@ def month_window(month: str) -> tuple[str, str]:
     return start, end
 
 
+def last_calendar_day_of_month(month: str) -> str:
+    """The real calendar last day (28-31) of a 'YYYY-MM' bucket month — e.g.
+    '2026-07' -> '2026-07-31'. Distinct from month_window's end boundary,
+    which is the 10th of the NEXT bucket month, not this one's own end."""
+    year, mon = int(month[:4]), int(month[5:7])
+    if mon == 12:
+        next_year, next_mon = year + 1, 1
+    else:
+        next_year, next_mon = year, mon + 1
+    last_day = date(next_year, next_mon, 1) - timedelta(days=1)
+    return last_day.isoformat()
+
+
 def current_bucket_month() -> str:
     return bucket_month(date.today().isoformat())
 
@@ -347,6 +360,19 @@ def clear_salary_for_month(conn, month: str):
     conn.execute("DELETE FROM monthly_salary WHERE month = ?", (month,))
 
 
+def _real_rent_date(conn, month: str):
+    """The bank's own standing-order line for this month's rent, if it's been
+    synced yet — filtering by month_window(month) guarantees whatever comes
+    back already buckets to `month`, so using its real date can never drift
+    the generated Rent expense into the wrong bucket."""
+    start, end = month_window(month)
+    row = conn.execute(
+        "SELECT booking_date FROM bank_transactions WHERE ABS(amount) = ? AND booking_date >= ? AND booking_date < ? ORDER BY booking_date LIMIT 1",
+        (RENT_AMOUNT, start, end),
+    ).fetchone()
+    return row["booking_date"] if row else None
+
+
 def sync_rent(conn):
     category = conn.execute(
         "SELECT id FROM categories WHERE name = ?", (RENT_CATEGORY_NAME,)
@@ -355,14 +381,26 @@ def sync_rent(conn):
         return
 
     for month in months_between(RENT_START_MONTH, current_bucket_month()):
-        already = conn.execute("SELECT 1 FROM rent_generated WHERE month = ?", (month,)).fetchone()
+        real_date = _real_rent_date(conn, month)
+        already = conn.execute("SELECT expense_id FROM rent_generated WHERE month = ?", (month,)).fetchone()
         if already:
+            # A deleted rent expense must stay deleted (rent_generated still
+            # holds the month), so only touch a row that's still there. The
+            # real standing-order line may not have synced yet at the time
+            # this row was first generated (dated on the placeholder '-10');
+            # once it shows up, replace the guess with the real date.
+            if real_date:
+                conn.execute(
+                    "UPDATE expenses SET date = ? WHERE id = ? AND date != ?",
+                    (real_date, already["expense_id"], real_date),
+                )
             continue
         # Dated on the 10th (the window's own start) so it buckets into this
-        # exact month rather than shifting back a month under bucket_month().
+        # exact month rather than shifting back a month under bucket_month() —
+        # used only as a placeholder until the real transaction is synced.
         cur = conn.execute(
             "INSERT INTO expenses (amount, category_id, date, note, is_rent) VALUES (?, ?, ?, 'Rent', 1)",
-            (RENT_AMOUNT, category["id"], f"{month}-10"),
+            (RENT_AMOUNT, category["id"], real_date or f"{month}-10"),
         )
         conn.execute(
             "INSERT INTO rent_generated (month, expense_id) VALUES (?, ?)",

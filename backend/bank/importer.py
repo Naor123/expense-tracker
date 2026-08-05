@@ -4,7 +4,23 @@ from bank.classify import CREDIT_CARD_COMPANY_IDS
 from bank.rules import suggest_category
 from bank.salary import recompute_salary_for_month
 from bank.types import NormalizedTxn
-from db import RENT_AMOUNT, bucket_month, month_window
+from db import RENT_AMOUNT, bucket_month, last_calendar_day_of_month, month_window, normalize_pattern
+
+# Merchants whose settlement date drifts near month-end (weekends/bank
+# holidays shift the exact posting day) similarly to the card bulk-payment
+# cycle, but which have no itemized source elsewhere — unlike the bulk line,
+# the charge itself must still be kept, just pinned to a stable date instead
+# of whichever exact day the bank happened to report.
+MONTH_END_NORMALIZED_MERCHANTS = [
+    "שלמה פסגה",  # car lease
+]
+
+
+def _normalize_expense_date(counterparty: Optional[str], booking_date: str) -> str:
+    haystack = normalize_pattern(counterparty or "")
+    if any(pattern in haystack for pattern in MONTH_END_NORMALIZED_MERCHANTS):
+        return last_calendar_day_of_month(bucket_month(booking_date))
+    return booking_date
 
 
 def _has_active_credit_card_connection(conn, exclude_connection_id: int) -> bool:
@@ -84,9 +100,10 @@ def _ignore_reason_for(conn, row) -> Optional[str]:
 
 def create_expense_from_transaction(conn, row, category_id: int) -> int:
     note = row["counterparty"] or row["description"]
+    expense_date = _normalize_expense_date(row["counterparty"], row["booking_date"])
     cur = conn.execute(
         "INSERT INTO expenses (amount, category_id, date, note, bank_txn_id) VALUES (?, ?, ?, ?, ?)",
-        (abs(row["amount"]), category_id, row["booking_date"], note, row["id"]),
+        (abs(row["amount"]), category_id, expense_date, note, row["id"]),
     )
     conn.execute(
         "UPDATE bank_transactions SET status = 'imported', expense_id = ?, ignore_reason = NULL WHERE id = ?",

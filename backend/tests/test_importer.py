@@ -207,6 +207,17 @@ def test_unknown_merchant_is_uncategorized(conn, bank_connection):
     assert row["name"] == "Uncategorized"
 
 
+def test_month_end_normalized_merchant_dates_to_last_calendar_day(conn, bank_connection):
+    # The car lease settles near month-end but the exact day drifts with
+    # weekends/bank holidays -- pin it to a stable date instead of trusting
+    # whichever day the bank happened to report.
+    txn_id = stage(conn, bank_connection, "tx-lease", -2786.70, booking_date="2026-07-10", counterparty='שלמה פסגה בע"מ')
+    materialize_expenses(conn, "2026-07")
+
+    row = conn.execute("SELECT date FROM expenses WHERE bank_txn_id = ?", (txn_id,)).fetchone()
+    assert row["date"] == "2026-07-31"
+
+
 def test_full_sync_path_stages_then_materializes(conn, bank_connection):
     txn = NormalizedTxn(
         external_id="tx-1", booking_date="2026-07-15", amount=-64.0,
