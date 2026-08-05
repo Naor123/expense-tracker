@@ -1,5 +1,5 @@
 from bank.scraper import _map_card_itemized_transaction
-from bank.sync import has_matching_cross_connection_charge, store_transactions
+from bank.sync import has_matching_cross_connection_charge, store_card_itemized_transactions, store_transactions
 from bank.types import NormalizedTxn
 
 
@@ -268,6 +268,49 @@ def test_bulk_card_payment_pending_when_itemized_charge_has_different_debit_date
 
     row = conn.execute("SELECT status FROM bank_transactions WHERE external_id = 'tx-card-nomatch'").fetchone()
     assert row["status"] == "pending"
+
+
+def test_force_settlement_overrides_date_based_classification(conn, bank_connection):
+    # Same calendar month booking/value would classify as 'immediate' by date
+    # comparison alone — force_settlement must win regardless.
+    txn = make_txn("tx-forced", amount=-10.0)
+    txn = txn.model_copy(update={"booking_date": "2026-08-01", "value_date": "2026-08-10"})
+    store_transactions(conn, bank_connection, [txn], force_settlement="delayed")
+    row = conn.execute("SELECT settlement FROM bank_transactions WHERE external_id = 'tx-forced'").fetchone()
+    assert row["settlement"] == "delayed"
+
+
+def test_target_month_discards_transactions_outside_the_window(conn, bank_connection):
+    # 2026-08 bucket window is [2026-08-10, 2026-09-10); an Aug-1 txn (day < 10)
+    # buckets into July and must be dropped when target_month='2026-08'.
+    in_window = make_txn("tx-in-window").model_copy(update={"booking_date": "2026-08-15"})
+    out_of_window = make_txn("tx-out-of-window").model_copy(update={"booking_date": "2026-08-01"})
+    result = store_transactions(conn, bank_connection, [in_window, out_of_window], target_month="2026-08")
+    assert result == {"fetched": 2, "inserted": 1, "skipped": 1}
+
+    rows = conn.execute("SELECT external_id FROM bank_transactions").fetchall()
+    assert [r["external_id"] for r in rows] == ["tx-in-window"]
+
+
+def test_store_card_itemized_transactions_splits_by_origin(conn, bank_connection):
+    national = NormalizedTxn(
+        external_id="card-national", booking_date="2026-08-01", value_date="2026-08-10",
+        amount=-27.0, counterparty="HATACO", raw={"origin": 1},
+    )
+    international = NormalizedTxn(
+        external_id="card-international", booking_date="2026-08-01", value_date="2026-08-03",
+        amount=-11.9, counterparty="APPLE", raw={"origin": 2},
+    )
+    result = store_card_itemized_transactions(conn, bank_connection, [national, international], "hapoalim")
+    assert result == {"fetched": 2, "inserted": 2, "skipped": 0}
+
+    nat_row = conn.execute("SELECT kind, settlement FROM bank_transactions WHERE external_id = 'card-national'").fetchone()
+    assert (nat_row["kind"], nat_row["settlement"]) == ("credit_card_charge", "delayed")
+
+    intl_row = conn.execute(
+        "SELECT kind, settlement FROM bank_transactions WHERE external_id = 'card-international'"
+    ).fetchone()
+    assert (intl_row["kind"], intl_row["settlement"]) == ("credit_card_charge", "immediate")
 
 
 def test_map_card_itemized_transaction():

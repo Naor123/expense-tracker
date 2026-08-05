@@ -185,6 +185,37 @@ def init_db():
         conn.close()
 
 
+def bucket_month(date_str: str) -> str:
+    """Maps a 'YYYY-MM-DD' date to its billing-cycle month: day >= 10 stays in
+    that calendar month, day < 10 shifts back one month. Matches how a credit
+    card statement actually works — a charge on the 1st isn't "this month's"
+    spending, it's still riding the previous cycle, which closes on the 10th."""
+    year, month, day = int(date_str[:4]), int(date_str[5:7]), int(date_str[8:10])
+    if day < 10:
+        month -= 1
+        if month == 0:
+            month, year = 12, year - 1
+    return f"{year:04d}-{month:02d}"
+
+
+def month_window(month: str) -> tuple[str, str]:
+    """Returns (start, end) 'YYYY-MM-DD' strings — the half-open date range
+    [start, end) whose every date buckets to `month` via bucket_month(). E.g.
+    month_window('2026-08') == ('2026-08-10', '2026-09-10')."""
+    year, mon = int(month[:4]), int(month[5:7])
+    start = f"{year:04d}-{mon:02d}-10"
+    if mon == 12:
+        end_year, end_mon = year + 1, 1
+    else:
+        end_year, end_mon = year, mon + 1
+    end = f"{end_year:04d}-{end_mon:02d}-10"
+    return start, end
+
+
+def current_bucket_month() -> str:
+    return bucket_month(date.today().isoformat())
+
+
 def months_between(start_month: str, end_month: str):
     start_year, start_mon = int(start_month[:4]), int(start_month[5:7])
     end_year, end_mon = int(end_month[:4]), int(end_month[5:7])
@@ -232,14 +263,15 @@ def sync_rent(conn):
     if not category:
         return
 
-    current_month = date.today().strftime("%Y-%m")
-    for month in months_between(RENT_START_MONTH, current_month):
+    for month in months_between(RENT_START_MONTH, current_bucket_month()):
         already = conn.execute("SELECT 1 FROM rent_generated WHERE month = ?", (month,)).fetchone()
         if already:
             continue
+        # Dated on the 10th (the window's own start) so it buckets into this
+        # exact month rather than shifting back a month under bucket_month().
         cur = conn.execute(
             "INSERT INTO expenses (amount, category_id, date, note, is_rent) VALUES (?, ?, ?, 'Rent', 1)",
-            (RENT_AMOUNT, category["id"], f"{month}-01"),
+            (RENT_AMOUNT, category["id"], f"{month}-10"),
         )
         conn.execute(
             "INSERT INTO rent_generated (month, expense_id) VALUES (?, ?)",

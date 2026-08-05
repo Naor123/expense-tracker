@@ -184,9 +184,9 @@ function App() {
     return result
   }
 
-  async function handleSyncBank(connectionId, dateFrom, dateTo) {
+  async function handleSyncBank(connectionId, month) {
     try {
-      await syncBank(connectionId, dateFrom, dateTo)
+      await syncBank(connectionId, month)
     } finally {
       // Refetch even on failure — a failed sync (e.g. OTP_REQUIRED) flips the
       // connection's status to 'error' server-side, which is what makes the

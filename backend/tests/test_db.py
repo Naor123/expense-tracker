@@ -1,13 +1,33 @@
-from datetime import date
-
 import db
+
+
+def test_bucket_month_before_the_10th_shifts_back_a_month():
+    assert db.bucket_month("2026-08-01") == "2026-07"
+    assert db.bucket_month("2026-08-09") == "2026-07"
+
+
+def test_bucket_month_on_or_after_the_10th_stays_in_month():
+    assert db.bucket_month("2026-08-10") == "2026-08"
+    assert db.bucket_month("2026-08-31") == "2026-08"
+
+
+def test_bucket_month_handles_year_rollover():
+    assert db.bucket_month("2027-01-05") == "2026-12"
+
+
+def test_month_window_matches_bucket_month_at_its_boundaries():
+    start, end = db.month_window("2026-08")
+    assert (start, end) == ("2026-08-10", "2026-09-10")
+    assert db.bucket_month(start) == "2026-08"
+    assert db.bucket_month(end) == "2026-09"  # end is exclusive
+    assert db.bucket_month("2026-09-09") == "2026-08"  # just inside the window
 
 
 def test_sync_rent_generates_one_expense_per_month_since_start(conn):
     db.sync_rent(conn)
 
     rows = conn.execute("SELECT date, amount, note, is_rent FROM expenses WHERE is_rent = 1 ORDER BY date").fetchall()
-    months = db.months_between(db.RENT_START_MONTH, date.today().strftime("%Y-%m"))
+    months = db.months_between(db.RENT_START_MONTH, db.current_bucket_month())
     assert len(rows) == len(months)
     for row in rows:
         assert row["amount"] == db.RENT_AMOUNT

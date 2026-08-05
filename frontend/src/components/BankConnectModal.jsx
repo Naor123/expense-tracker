@@ -6,10 +6,6 @@ function formatDateTime(iso) {
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
-function today() {
-  return new Date().toISOString().slice(0, 10)
-}
-
 const SCRAPER_COMPANIES = {
   hapoalim: { label: 'Bank Hapoalim', credentialLabel: 'ID number', connectionLabel: 'Hapoalim (Bank)' },
   max: { label: 'Max Credit Card', credentialLabel: 'Username', connectionLabel: 'Max (Credit Card)' },
@@ -104,7 +100,7 @@ export default function BankConnectModal({
     setSyncingId(connection.id)
     setError('')
     try {
-      await onSync(connection.id, `${month}-01`, today())
+      await onSync(connection.id, month)
     } catch (err) {
       setError(err.response?.data?.detail || 'Sync failed.')
     } finally {

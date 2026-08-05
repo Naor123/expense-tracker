@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,13 +13,21 @@ from bank.config import get_bank_settings
 from bank.errors import BankAuthError, BankConfigError, BankFetchError
 from bank.psd2 import Psd2Client
 from bank.scraper import ScraperClient
-from bank.sync import has_matching_cross_connection_charge, store_transactions, sync_bank_transactions
+from bank.sync import (
+    has_matching_cross_connection_charge,
+    store_card_itemized_transactions,
+    store_transactions,
+    sync_bank_transactions,
+)
 from db import (
     RENT_AMOUNT,
     RENT_START_MONTH,
+    bucket_month,
+    current_bucket_month,
     get_connection,
     get_salary_for_month,
     init_db,
+    month_window,
     set_salary_for_month,
     sync_rent,
 )
@@ -202,10 +210,11 @@ def list_expenses(month: str | None = None):
     conn = get_connection()
     try:
         sync_rent(conn)
+        start, end = month_window(month)
         rows = conn.execute(
             EXPENSE_JOIN_SELECT
-            + " WHERE e.date LIKE ? ORDER BY e.date DESC, e.id DESC",
-            (f"{month}-%",),
+            + " WHERE e.date >= ? AND e.date < ? ORDER BY e.date DESC, e.id DESC",
+            (start, end),
         ).fetchall()
         return [row_to_expense(r) for r in rows]
     finally:
@@ -262,18 +271,19 @@ def delete_expense(expense_id: int):
 
 
 def compute_summary(conn, month: str) -> dict:
+    start, end = month_window(month)
     rows = conn.execute(
         """
         SELECT c.id AS category_id, c.name AS name, c.color AS color,
                SUM(e.amount) AS amount
         FROM expenses e
         JOIN categories c ON c.id = e.category_id
-        WHERE e.date LIKE ?
+        WHERE e.date >= ? AND e.date < ?
         GROUP BY c.id, c.name, c.color
         HAVING SUM(e.amount) > 0
         ORDER BY amount DESC
         """,
-        (f"{month}-%",),
+        (start, end),
     ).fetchall()
 
     total = sum(r["amount"] for r in rows)
@@ -294,9 +304,10 @@ def compute_summary(conn, month: str) -> dict:
         """
         SELECT SUM(-amount) AS amount
         FROM bank_transactions
-        WHERE kind = 'credit_card_charge' AND settlement = 'delayed' AND booking_date LIKE ?
+        WHERE kind = 'credit_card_charge' AND settlement = 'delayed'
+              AND booking_date >= ? AND booking_date < ?
         """,
-        (f"{month}-%",),
+        (start, end),
     ).fetchone()
     pending_settlement = round(pending_row["amount"] or 0, 2)
 
@@ -374,16 +385,10 @@ def list_months():
     conn = get_connection()
     try:
         sync_rent(conn)
-        rows = conn.execute(
-            """
-            SELECT DISTINCT substr(date, 1, 7) AS month
-            FROM expenses
-            ORDER BY month DESC
-            """
-        ).fetchall()
-        months = [r["month"] for r in rows]
+        rows = conn.execute("SELECT date FROM expenses").fetchall()
+        months = sorted({bucket_month(r["date"]) for r in rows}, reverse=True)
         if not months:
-            return [date.today().strftime("%Y-%m")]
+            return [current_bucket_month()]
         return months
     finally:
         conn.close()
@@ -396,7 +401,11 @@ def _now() -> str:
 
 
 def _month_start() -> str:
-    return date.today().replace(day=1).isoformat()
+    """Fetch-start date for a first-time connect/reverify — the start of the
+    current billing-cycle window (10th of some month), not the calendar month,
+    so an early-month login still pulls the full still-open cycle."""
+    start, _ = month_window(current_bucket_month())
+    return start
 
 
 def row_to_bank_connection(row) -> dict:
@@ -490,7 +499,7 @@ def _create_scraper_connection(conn, label: str, company_id: str, credentials: d
     connection_id = cur.lastrowid
 
     card_itemized_txns = scraped.get("card_itemized_by_account", {}).get(account_ref, [])
-    store_transactions(conn, connection_id, card_itemized_txns, company_id, force_kind="credit_card_charge")
+    store_card_itemized_transactions(conn, connection_id, card_itemized_txns, company_id)
     txns = scraped["transactions_by_account"].get(account_ref, [])
     store_transactions(conn, connection_id, txns, company_id)
 
@@ -520,9 +529,7 @@ def _update_scraper_connection(conn, connection_id: int, scraped: dict) -> dict:
     conn.commit()
 
     card_itemized_txns = scraped.get("card_itemized_by_account", {}).get(account_ref, [])
-    store_transactions(
-        conn, connection_id, card_itemized_txns, scraped.get("company_id"), force_kind="credit_card_charge"
-    )
+    store_card_itemized_transactions(conn, connection_id, card_itemized_txns, scraped.get("company_id"))
     txns = scraped["transactions_by_account"].get(account_ref, [])
     store_transactions(conn, connection_id, txns, scraped.get("company_id"))
 
@@ -739,11 +746,12 @@ def reverify_bank_connection_otp(connection_id: int, payload: BankReverifyOtpSub
 
 
 @app.post("/bank/sync", response_model=BankSyncOut)
-def bank_sync(connection_id: int, date_from: str, date_to: str):
+def bank_sync(connection_id: int, month: str):
+    validate_month(month)
     conn = get_connection()
     try:
         try:
-            return sync_bank_transactions(conn, connection_id, date_from, date_to)
+            return sync_bank_transactions(conn, connection_id, month)
         except BankConfigError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except BankAuthError as e:
