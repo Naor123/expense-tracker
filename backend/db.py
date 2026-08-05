@@ -309,6 +309,13 @@ def months_between(start_month: str, end_month: str):
     return months
 
 
+def previous_month(month: str) -> str:
+    year, mon = int(month[:4]), int(month[5:7])
+    if mon == 1:
+        return f"{year - 1:04d}-12"
+    return f"{year:04d}-{mon - 1:02d}"
+
+
 def get_salary_for_month(conn, month: str):
     row = conn.execute(
         "SELECT amount FROM monthly_salary WHERE month <= ? ORDER BY month DESC LIMIT 1",

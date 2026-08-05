@@ -108,3 +108,8 @@ def test_last_calendar_day_of_month():
     assert db.last_calendar_day_of_month("2026-07") == "2026-07-31"
     assert db.last_calendar_day_of_month("2026-02") == "2026-02-28"
     assert db.last_calendar_day_of_month("2026-12") == "2026-12-31"
+
+
+def test_previous_month():
+    assert db.previous_month("2026-07") == "2026-06"
+    assert db.previous_month("2026-01") == "2025-12"

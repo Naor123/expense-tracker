@@ -4,13 +4,21 @@ from bank.classify import CREDIT_CARD_COMPANY_IDS
 from bank.rules import suggest_category
 from bank.salary import recompute_salary_for_month
 from bank.types import NormalizedTxn
-from db import RENT_AMOUNT, bucket_month, last_calendar_day_of_month, month_window, normalize_pattern
+from db import (
+    RENT_AMOUNT,
+    bucket_month,
+    last_calendar_day_of_month,
+    month_window,
+    normalize_pattern,
+    previous_month,
+)
 
-# Merchants whose settlement date drifts near month-end (weekends/bank
-# holidays shift the exact posting day) similarly to the card bulk-payment
-# cycle, but which have no itemized source elsewhere — unlike the bulk line,
-# the charge itself must still be kept, just pinned to a stable date instead
-# of whichever exact day the bank happened to report.
+# Merchants that post around the 10th of the month but whose charge is for
+# the period ending BEFORE that cutoff — the payment belongs to the prior
+# month's spending even though it lands in the current bucket by the usual
+# day>=10 rule. The exact posting day also drifts a little with weekends/bank
+# holidays, so rather than trust it literally, pin the date to the last
+# calendar day of the month the charge actually belongs to.
 MONTH_END_NORMALIZED_MERCHANTS = [
     "שלמה פסגה",  # car lease
 ]
@@ -19,7 +27,7 @@ MONTH_END_NORMALIZED_MERCHANTS = [
 def _normalize_expense_date(counterparty: Optional[str], booking_date: str) -> str:
     haystack = normalize_pattern(counterparty or "")
     if any(pattern in haystack for pattern in MONTH_END_NORMALIZED_MERCHANTS):
-        return last_calendar_day_of_month(bucket_month(booking_date))
+        return last_calendar_day_of_month(previous_month(booking_date[:7]))
     return booking_date
 
 

@@ -207,15 +207,26 @@ def test_unknown_merchant_is_uncategorized(conn, bank_connection):
     assert row["name"] == "Uncategorized"
 
 
-def test_month_end_normalized_merchant_dates_to_last_calendar_day(conn, bank_connection):
-    # The car lease settles near month-end but the exact day drifts with
-    # weekends/bank holidays -- pin it to a stable date instead of trusting
-    # whichever day the bank happened to report.
+def test_month_end_normalized_merchant_dates_to_the_prior_months_last_day(conn, bank_connection):
+    # The car lease posts around the 10th but pays for the period ending
+    # BEFORE that cutoff -- it belongs to the prior month's spending, not the
+    # bucket the raw posting date would normally fall into.
     txn_id = stage(conn, bank_connection, "tx-lease", -2786.70, booking_date="2026-07-10", counterparty='שלמה פסגה בע"מ')
     materialize_expenses(conn, "2026-07")
 
     row = conn.execute("SELECT date FROM expenses WHERE bank_txn_id = ?", (txn_id,)).fetchone()
-    assert row["date"] == "2026-07-31"
+    assert row["date"] == "2026-06-30"
+
+
+def test_month_end_normalized_merchant_is_stable_across_a_couple_days_of_drift(conn, bank_connection):
+    # Whether the bank posts it on the 9th or the 10th, it must land on the
+    # same target date -- the whole point is not trusting the exact day. A
+    # July-9th posting buckets (and materializes) into June, not July.
+    txn_id = stage(conn, bank_connection, "tx-lease", -2786.70, booking_date="2026-07-09", counterparty='שלמה פסגה בע"מ')
+    materialize_expenses(conn, "2026-06")
+
+    row = conn.execute("SELECT date FROM expenses WHERE bank_txn_id = ?", (txn_id,)).fetchone()
+    assert row["date"] == "2026-06-30"
 
 
 def test_full_sync_path_stages_then_materializes(conn, bank_connection):
