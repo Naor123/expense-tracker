@@ -3,14 +3,13 @@ from datetime import date, datetime, timezone
 from typing import List, Optional
 
 from bank import crypto
-from bank.classify import CREDIT_CARD_COMPANY_IDS, classify_settlement, classify_transaction
+from bank.classify import classify_settlement, classify_transaction
 from bank.errors import BankAuthError, BankConfigError, BankFetchError
+from bank.importer import materialize_expenses
 from bank.psd2 import Psd2Client
-from bank.rules import suggest_category
-from bank.salary import match_salary_rule
 from bank.scraper import ScraperClient
 from bank.types import NormalizedTxn
-from db import bucket_month, month_window, set_salary_for_month
+from db import bucket_month, month_window
 
 
 def _now() -> str:
@@ -65,65 +64,15 @@ def _fetch_scraper(conn, connection, date_from: str) -> tuple[List[NormalizedTxn
     return [], []
 
 
-def _has_active_credit_card_connection(conn, exclude_connection_id: int) -> bool:
-    placeholders = ",".join("?" * len(CREDIT_CARD_COMPANY_IDS))
-    row = conn.execute(
-        f"""
-        SELECT 1 FROM bank_connections
-        WHERE status = 'valid' AND id != ? AND company_id IN ({placeholders})
-        LIMIT 1
-        """,
-        (exclude_connection_id, *CREDIT_CARD_COMPANY_IDS),
-    ).fetchone()
-    return row is not None
-
-
-def _has_itemized_charge_for_debit_date(conn, connection_id: int, value_date: Optional[str]) -> bool:
-    if not value_date:
-        return False
-    row = conn.execute(
-        "SELECT 1 FROM bank_transactions WHERE connection_id = ? AND kind = 'credit_card_charge' AND value_date = ? LIMIT 1",
-        (connection_id, value_date),
-    ).fetchone()
-    return row is not None
-
-
-def has_matching_cross_connection_charge(conn, row) -> bool:
-    """True if this bank_transactions row has a same-amount, close-date
-    counterpart from a DIFFERENT connection — signals the same purchase was
-    likely imported twice: once itemized via the card connection, once as
-    its own line on the bank feed (only happens for immediate-settling
-    charges; the bulk lump sum is already handled by the name-fragment
-    match in classify_transaction)."""
-    if row["kind"] == "credit_card_charge" and row["settlement"] == "immediate":
-        anchor_date, other_kind, other_date_col = row["value_date"], "bank_transfer", "booking_date"
-    elif row["kind"] == "bank_transfer":
-        anchor_date, other_kind, other_date_col = row["booking_date"], "credit_card_charge", "value_date"
-    else:
-        return False
-    if not anchor_date:
-        return False
-    match = conn.execute(
-        f"""
-        SELECT 1 FROM bank_transactions
-        WHERE connection_id != ? AND kind = ?
-          AND (kind != 'credit_card_charge' OR settlement = 'immediate')
-          AND amount = ? AND {other_date_col} IS NOT NULL
-          AND ABS(julianday({other_date_col}) - julianday(?)) <= 3
-        LIMIT 1
-        """,
-        (row["connection_id"], other_kind, row["amount"], anchor_date),
-    ).fetchone()
-    return match is not None
-
-
 def store_transactions(
     conn, connection_id: int, txns: List[NormalizedTxn], company_id: Optional[str] = None,
     force_kind: Optional[str] = None, force_settlement: Optional[str] = None,
     target_month: Optional[str] = None,
 ) -> dict:
-    """Dedupe-insert NormalizedTxns into bank_transactions. Shared by sync_bank_transactions
-    and the scraper's connect flow (which already has a batch of txns from its first login).
+    """Stage NormalizedTxns into bank_transactions as status='new'. Pure writer —
+    whether a row becomes an expense is decided later by
+    bank.importer.materialize_expenses, which sees every row at once instead of
+    one at a time mid-insert.
 
     target_month, when given, silently discards any txn whose booking_date
     doesn't bucket into that month — a sync scoped to one month shouldn't
@@ -133,40 +82,19 @@ def store_transactions(
     for txn in txns:
         if target_month and bucket_month(txn.booking_date) != target_month:
             continue
-        kind = force_kind or classify_transaction(txn.counterparty, txn.description, company_id)
         settlement = force_settlement or classify_settlement(txn.booking_date, txn.value_date)
-        if txn.amount > 0:
-            if kind == "bank_transfer" and match_salary_rule(conn, txn.counterparty):
-                status = "salary"
-                set_salary_for_month(conn, txn.booking_date[:7], txn.amount)
-            elif kind == "bank_transfer":
-                # Unrecognized incoming bank credit — let the user confirm/ignore
-                # or mark it as a salary source in the review UI.
-                status = "pending"
-            else:
-                status = "ignored"  # card-side credits (refunds etc.)
-        elif kind == "credit_card_payment" and (
-            _has_active_credit_card_connection(conn, connection_id)
-            or _has_itemized_charge_for_debit_date(conn, connection_id, txn.value_date)
-        ):
-            # Same spending as the itemized credit_card_charge rows from the card
-            # connection (or from itemized data on this same connection) — counting
-            # both would double it.
-            status = "ignored"
-        else:
-            status = "pending"
-        category_id = suggest_category(conn, txn)
+        kind = force_kind or classify_transaction(txn.counterparty, txn.description, company_id, settlement)
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO bank_transactions
                 (connection_id, external_id, booking_date, value_date, amount, currency,
-                 counterparty, description, raw_json, status, kind, settlement, suggested_category_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 counterparty, description, raw_json, status, kind, settlement, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)
             """,
             (
                 connection_id, txn.external_id, txn.booking_date, txn.value_date, txn.amount,
                 txn.currency, txn.counterparty, txn.description, json.dumps(txn.raw),
-                status, kind, settlement, category_id, _now(),
+                kind, settlement, _now(),
             ),
         )
         if cur.rowcount:
@@ -228,8 +156,6 @@ def sync_bank_transactions(conn, connection_id: int, month: str) -> dict:
         conn.commit()
         raise
 
-    # Itemized charges must be inserted first so the bulk credit_card_payment
-    # line's auto-ignore check (_has_itemized_charge_for_debit_date) can find them.
     itemized_result = store_card_itemized_transactions(
         conn, connection_id, card_itemized_txns, connection["company_id"], target_month=month
     )
@@ -239,6 +165,7 @@ def sync_bank_transactions(conn, connection_id: int, month: str) -> dict:
         "inserted": itemized_result["inserted"] + regular_result["inserted"],
         "skipped": itemized_result["skipped"] + regular_result["skipped"],
     }
+    result.update(materialize_expenses(conn, month))
 
     conn.execute(
         "UPDATE bank_connections SET status = 'valid', last_synced_at = ?, last_error = NULL WHERE id = ?",

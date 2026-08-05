@@ -18,17 +18,24 @@ CREDIT_CARD_COMPANY_NAME_FRAGMENTS = [
 ]
 
 
-def classify_transaction(counterparty: str, description: str, company_id: str) -> str:
+def classify_transaction(counterparty: str, description: str, company_id: str, settlement: str) -> str:
     """Returns 'credit_card_charge' (itemized purchase from a card connection),
     'credit_card_payment' (a bank account's lump-sum debit to a card company —
     the same spending as credit_card_charge rows, just unitemized), or
     'bank_transfer' (everything else on a bank account: transfers, standing
-    orders, checks, direct debits)."""
+    orders, checks, direct debits).
+
+    A name-fragment match only counts as the bulk payment when settlement is
+    'delayed' — the once-a-month lump sum really does ride the delayed cycle.
+    A same-day (immediate) match against a card network name is an individual
+    foreign-currency purchase that happens to be labeled with the network name
+    on the account feed, not the bulk payment; treating it as one would
+    wrongly auto-ignore a real expense."""
     if company_id in CREDIT_CARD_COMPANY_IDS:
         return "credit_card_charge"
 
     haystack = f"{counterparty or ''} {description or ''}".lower()
-    if any(fragment.lower() in haystack for fragment in CREDIT_CARD_COMPANY_NAME_FRAGMENTS):
+    if settlement == "delayed" and any(fragment.lower() in haystack for fragment in CREDIT_CARD_COMPANY_NAME_FRAGMENTS):
         return "credit_card_payment"
 
     return "bank_transfer"

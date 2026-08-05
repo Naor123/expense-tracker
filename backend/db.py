@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 from datetime import date
 
@@ -171,6 +172,25 @@ def init_db():
         if "settlement" not in txn_columns:
             conn.execute("ALTER TABLE bank_transactions ADD COLUMN settlement TEXT NOT NULL DEFAULT 'immediate'")
             conn.commit()
+        if "ignore_reason" not in txn_columns:
+            conn.execute("ALTER TABLE bank_transactions ADD COLUMN ignore_reason TEXT")
+            conn.commit()
+
+        salary_columns = [row["name"] for row in conn.execute("PRAGMA table_info(monthly_salary)").fetchall()]
+        if "source" not in salary_columns:
+            # Defaults to 'manual' so any salary figure that predates
+            # auto-detection is treated as user-set and can never be silently
+            # overwritten by it.
+            conn.execute("ALTER TABLE monthly_salary ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+            conn.commit()
+
+        # Salary is now derived from the largest monthly credit, so the old
+        # pattern table has no writer left.
+        conn.execute("DROP TABLE IF EXISTS salary_rules")
+        conn.commit()
+
+        _migrate_transaction_statuses(conn)
+        _migrate_category_rule_patterns(conn)
 
         for name, color in SEED_CATEGORIES:
             conn.execute(
@@ -183,6 +203,52 @@ def init_db():
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate_transaction_statuses(conn):
+    stale = conn.execute(
+        "SELECT 1 FROM bank_transactions WHERE status IN ('pending', 'approved') LIMIT 1"
+    ).fetchone()
+    if not stale:
+        return
+    # 'approved' rows already have their expense row linked via expense_id, so
+    # this is a pure rename — materialize_expenses skips 'imported'. 'pending'
+    # rows become candidates but nothing is created until an explicit backfill.
+    conn.execute("UPDATE bank_transactions SET status = 'imported' WHERE status = 'approved'")
+    conn.execute("UPDATE bank_transactions SET status = 'new' WHERE status = 'pending'")
+    conn.execute(
+        "UPDATE bank_transactions SET ignore_reason = 'legacy' WHERE status = 'ignored' AND ignore_reason IS NULL"
+    )
+    conn.commit()
+
+
+def _migrate_category_rule_patterns(conn):
+    """Normalizes stored patterns and drops duplicates (newest wins) so the
+    unique index below can be created. Must run before it — CREATE UNIQUE INDEX
+    fails on existing dupes and would take init_db down with it."""
+    rows = conn.execute("SELECT id, pattern FROM category_rules ORDER BY id").fetchall()
+    seen = {}
+    for row in rows:
+        normalized = normalize_pattern(row["pattern"])
+        if normalized != row["pattern"]:
+            conn.execute("UPDATE category_rules SET pattern = ? WHERE id = ?", (normalized, row["id"]))
+        if normalized in seen:
+            conn.execute("DELETE FROM category_rules WHERE id = ?", (seen[normalized],))
+        seen[normalized] = row["id"]
+    conn.execute("DELETE FROM category_rules WHERE pattern = ''")
+    conn.commit()
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_category_rules_pattern ON category_rules(pattern)"
+    )
+    conn.commit()
+
+
+def normalize_pattern(text: str) -> str:
+    """Lowercased, whitespace-collapsed. Bank counterparties arrive with runs of
+    spaces ('APPLE.COM/BILL         CORK') and inconsistent casing, so both
+    stored patterns and the text they're matched against go through this —
+    otherwise a perfectly correct pattern silently never matches."""
+    return re.sub(r"\s+", " ", (text or "")).strip().lower()
 
 
 def bucket_month(date_str: str) -> str:
@@ -246,14 +312,39 @@ def get_salary_for_month(conn, month: str):
     return None
 
 
-def set_salary_for_month(conn, month: str, amount: float):
+def set_salary_for_month(conn, month: str, amount: float, source: str = "manual"):
+    """source='auto' will not overwrite a row the user set by hand — the WHERE
+    on the upsert makes that a single statement rather than a read-then-write
+    that could race."""
+    if source == "auto":
+        conn.execute(
+            """
+            INSERT INTO monthly_salary (month, amount, source) VALUES (?, ?, 'auto')
+            ON CONFLICT(month) DO UPDATE SET amount = excluded.amount
+            WHERE monthly_salary.source = 'auto'
+            """,
+            (month, amount),
+        )
+        return
     conn.execute(
         """
-        INSERT INTO monthly_salary (month, amount) VALUES (?, ?)
-        ON CONFLICT(month) DO UPDATE SET amount = excluded.amount
+        INSERT INTO monthly_salary (month, amount, source) VALUES (?, ?, 'manual')
+        ON CONFLICT(month) DO UPDATE SET amount = excluded.amount, source = 'manual'
         """,
         (month, amount),
     )
+
+
+def get_salary_source_for_month(conn, month: str):
+    row = conn.execute(
+        "SELECT source FROM monthly_salary WHERE month <= ? ORDER BY month DESC LIMIT 1",
+        (month,),
+    ).fetchone()
+    return row["source"] if row else None
+
+
+def clear_salary_for_month(conn, month: str):
+    conn.execute("DELETE FROM monthly_salary WHERE month = ?", (month,))
 
 
 def sync_rent(conn):

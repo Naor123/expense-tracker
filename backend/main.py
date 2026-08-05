@@ -11,44 +11,44 @@ from bank import crypto
 from bank.companies import SCRAPER_COMPANIES
 from bank.config import get_bank_settings
 from bank.errors import BankAuthError, BankConfigError, BankFetchError
+from bank.importer import create_expense_from_transaction, materialize_expenses
 from bank.psd2 import Psd2Client
+from bank.rules import suggest_category
 from bank.scraper import ScraperClient
 from bank.sync import (
-    has_matching_cross_connection_charge,
     store_card_itemized_transactions,
     store_transactions,
     sync_bank_transactions,
 )
+from bank.types import NormalizedTxn
 from db import (
-    RENT_AMOUNT,
-    RENT_START_MONTH,
-    bucket_month,
+    clear_salary_for_month,
     current_bucket_month,
     get_connection,
     get_salary_for_month,
+    get_salary_source_for_month,
     init_db,
     month_window,
+    normalize_pattern,
     set_salary_for_month,
     sync_rent,
 )
 from mailer import MailerConfigError, MailerSendError, send_summary_email
 from models import (
+    BankBackfillOut,
     BankConnectCreate,
     BankConnectionOut,
     BankConnectOtpSubmit,
     BankReverifyOtpSubmit,
     BankSyncOut,
-    BankTransactionApprove,
-    BankTransactionMarkSalary,
     BankTransactionOut,
-    BankTransactionsBulkApprove,
     CategoryCreate,
     CategoryOut,
     CategoryRuleCreate,
     CategoryRuleOut,
     CategoryUpdate,
-    ExpenseCreate,
     ExpenseOut,
+    ExpenseUpdate,
     InsightsEmailOut,
     SalaryOut,
     SalaryUpdate,
@@ -221,25 +221,46 @@ def list_expenses(month: str | None = None):
         conn.close()
 
 
-@app.post("/expenses", response_model=ExpenseOut, status_code=201)
-def create_expense(payload: ExpenseCreate):
+@app.patch("/expenses/{expense_id}", response_model=ExpenseOut)
+def update_expense(expense_id: int, payload: ExpenseUpdate):
     conn = get_connection()
     try:
+        row = conn.execute(
+            "SELECT id, bank_txn_id FROM expenses WHERE id = ?", (expense_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Expense not found")
         category = conn.execute(
             "SELECT id FROM categories WHERE id = ?", (payload.category_id,)
         ).fetchone()
         if not category:
             raise HTTPException(status_code=404, detail="Category not found")
 
-        cur = conn.execute(
-            "INSERT INTO expenses (amount, category_id, date, note) VALUES (?, ?, ?, ?)",
-            (payload.amount, payload.category_id, payload.date, payload.note),
+        conn.execute(
+            "UPDATE expenses SET category_id = ? WHERE id = ?", (payload.category_id, expense_id)
         )
+
+        if payload.remember and row["bank_txn_id"] is not None:
+            txn = conn.execute(
+                "SELECT counterparty, description FROM bank_transactions WHERE id = ?",
+                (row["bank_txn_id"],),
+            ).fetchone()
+            pattern = normalize_pattern(txn["counterparty"] or txn["description"]) if txn else ""
+            if pattern:
+                # Upsert, not insert: a second correction for the same merchant
+                # must replace the first, or suggest_category keeps matching the
+                # stale rule and the fix silently never takes effect.
+                conn.execute(
+                    """
+                    INSERT INTO category_rules (pattern, category_id, created_at) VALUES (?, ?, ?)
+                    ON CONFLICT(pattern) DO UPDATE SET category_id = excluded.category_id, created_at = excluded.created_at
+                    """,
+                    (pattern, payload.category_id, _now()),
+                )
+
         conn.commit()
-        row = conn.execute(
-            EXPENSE_JOIN_SELECT + " WHERE e.id = ?", (cur.lastrowid,)
-        ).fetchone()
-        return row_to_expense(row)
+        updated = conn.execute(EXPENSE_JOIN_SELECT + " WHERE e.id = ?", (expense_id,)).fetchone()
+        return row_to_expense(updated)
     finally:
         conn.close()
 
@@ -254,17 +275,18 @@ def delete_expense(expense_id: int):
         # rent_generated / bank_transactions rows may reference this expense
         # and must survive the delete (same FK relaxation as delete_recurring_bill)
         conn.execute("PRAGMA foreign_keys = OFF")
-        conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
-        if row["bank_txn_id"] is not None:
-            # Otherwise the transaction is stuck: not in expenses (deleted) and
-            # not in the review queue either (status stayed 'approved'), so a
-            # resync silently does nothing — INSERT OR IGNORE no-ops since the
-            # row already exists.
-            conn.execute(
-                "UPDATE bank_transactions SET status = 'pending', expense_id = NULL WHERE id = ?",
-                (row["bank_txn_id"],),
-            )
-        conn.commit()
+        try:
+            conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+            if row["bank_txn_id"] is not None:
+                # Must be terminal, not back to 'new': the next materialize pass
+                # would otherwise immediately recreate the expense just deleted.
+                conn.execute(
+                    "UPDATE bank_transactions SET status = 'ignored', expense_id = NULL, ignore_reason = 'user_deleted' WHERE id = ?",
+                    (row["bank_txn_id"],),
+                )
+            conn.commit()
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
         return None
     finally:
         conn.close()
@@ -363,7 +385,7 @@ def get_salary(month: str | None = None):
     conn = get_connection()
     try:
         amount = get_salary_for_month(conn, month)
-        return {"month": month, "amount": amount}
+        return {"month": month, "amount": amount, "source": get_salary_source_for_month(conn, month)}
     finally:
         conn.close()
 
@@ -373,9 +395,22 @@ def set_salary(payload: SalaryUpdate, month: str | None = None):
     validate_month(month)
     conn = get_connection()
     try:
-        set_salary_for_month(conn, month, payload.amount)
+        set_salary_for_month(conn, month, payload.amount, source="manual")
         conn.commit()
-        return {"month": month, "amount": payload.amount}
+        return {"month": month, "amount": payload.amount, "source": "manual"}
+    finally:
+        conn.close()
+
+
+@app.delete("/salary", status_code=204)
+def clear_salary(month: str | None = None):
+    """Drops a manual override so auto-detection owns the month again."""
+    validate_month(month)
+    conn = get_connection()
+    try:
+        clear_salary_for_month(conn, month)
+        conn.commit()
+        return None
     finally:
         conn.close()
 
@@ -425,7 +460,7 @@ def row_to_bank_connection(row) -> dict:
 BANK_TRANSACTION_JOIN_SELECT = """
     SELECT t.id, t.connection_id, t.external_id, t.booking_date, t.value_date, t.amount,
            t.currency, t.counterparty, t.description, t.status, t.kind, t.settlement,
-           t.suggested_category_id, t.expense_id, c.name AS suggested_category_name,
+           t.suggested_category_id, t.expense_id, t.ignore_reason, c.name AS suggested_category_name,
            bc.company_id AS connection_company_id, bc.label AS connection_label
     FROM bank_transactions t
     LEFT JOIN categories c ON c.id = t.suggested_category_id
@@ -434,10 +469,6 @@ BANK_TRANSACTION_JOIN_SELECT = """
 
 
 def row_to_bank_transaction(conn, row) -> dict:
-    possible_duplicate = (
-        (row["amount"] < 0 and abs(row["amount"]) == RENT_AMOUNT and row["booking_date"][:7] >= RENT_START_MONTH)
-        or has_matching_cross_connection_charge(conn, row)
-    )
     return {
         "id": row["id"],
         "connection_id": row["connection_id"],
@@ -454,7 +485,7 @@ def row_to_bank_transaction(conn, row) -> dict:
         "suggested_category_id": row["suggested_category_id"],
         "suggested_category_name": row["suggested_category_name"],
         "expense_id": row["expense_id"],
-        "possible_duplicate": possible_duplicate,
+        "ignore_reason": row["ignore_reason"],
         "connection_company_id": row["connection_company_id"],
         "connection_label": row["connection_label"],
     }
@@ -502,6 +533,9 @@ def _create_scraper_connection(conn, label: str, company_id: str, credentials: d
     store_card_itemized_transactions(conn, connection_id, card_itemized_txns, company_id)
     txns = scraped["transactions_by_account"].get(account_ref, [])
     store_transactions(conn, connection_id, txns, company_id)
+    # The first login fetches an unbounded date range, so only the current
+    # month is materialized — older months stay staged until backfilled.
+    materialize_expenses(conn, current_bucket_month())
 
     row = conn.execute("SELECT * FROM bank_connections WHERE id = ?", (connection_id,)).fetchone()
     return row_to_bank_connection(row)
@@ -532,6 +566,7 @@ def _update_scraper_connection(conn, connection_id: int, scraped: dict) -> dict:
     store_card_itemized_transactions(conn, connection_id, card_itemized_txns, scraped.get("company_id"))
     txns = scraped["transactions_by_account"].get(account_ref, [])
     store_transactions(conn, connection_id, txns, scraped.get("company_id"))
+    materialize_expenses(conn, current_bucket_month())
 
     row = conn.execute("SELECT * FROM bank_connections WHERE id = ?", (connection_id,)).fetchone()
     return row_to_bank_connection(row)
@@ -763,108 +798,61 @@ def bank_sync(connection_id: int, month: str):
 
 
 @app.get("/bank/transactions", response_model=list[BankTransactionOut])
-def list_bank_transactions(status: str | None = None):
+def list_bank_transactions(status: str | None = None, month: str | None = None):
     conn = get_connection()
     try:
         query = BANK_TRANSACTION_JOIN_SELECT
-        params = ()
+        clauses = []
+        params = []
         if status:
-            query += " WHERE t.status = ?"
-            params = (status,)
+            clauses.append("t.status = ?")
+            params.append(status)
+        if month:
+            validate_month(month)
+            start, end = month_window(month)
+            clauses.append("t.booking_date >= ? AND t.booking_date < ?")
+            params.extend([start, end])
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY t.booking_date DESC, t.id DESC"
-        rows = conn.execute(query, params).fetchall()
+        rows = conn.execute(query, tuple(params)).fetchall()
         return [row_to_bank_transaction(conn, r) for r in rows]
     finally:
         conn.close()
 
 
-def _approve_transaction(conn, txn_row, category_id: int, note: str | None) -> int:
-    category = conn.execute("SELECT id FROM categories WHERE id = ?", (category_id,)).fetchone()
-    if not category:
-        raise HTTPException(status_code=404, detail="Category not found")
-
-    expense_note = note if note is not None else txn_row["counterparty"] or txn_row["description"]
-    cur = conn.execute(
-        "INSERT INTO expenses (amount, category_id, date, note, bank_txn_id) VALUES (?, ?, ?, ?, ?)",
-        (abs(txn_row["amount"]), category_id, txn_row["booking_date"], expense_note, txn_row["id"]),
-    )
-    conn.execute(
-        "UPDATE bank_transactions SET status = 'approved', expense_id = ? WHERE id = ?",
-        (cur.lastrowid, txn_row["id"]),
-    )
-    return cur.lastrowid
-
-
-@app.post("/bank/transactions/{txn_id}/approve", response_model=BankTransactionOut)
-def approve_bank_transaction(txn_id: int, payload: BankTransactionApprove):
+@app.post("/bank/transactions/{txn_id}/restore", response_model=BankTransactionOut)
+def restore_bank_transaction(txn_id: int):
+    """Turns an auto-ignored transaction into an expense anyway. Deliberately
+    bypasses every ignore gate — it exists precisely to override them."""
     conn = get_connection()
     try:
         row = conn.execute("SELECT * FROM bank_transactions WHERE id = ?", (txn_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Bank transaction not found")
-        if row["status"] != "pending":
-            raise HTTPException(status_code=409, detail=f"Transaction is already {row['status']}")
+        if row["status"] != "ignored":
+            raise HTTPException(status_code=409, detail=f"Transaction is {row['status']}, not ignored")
 
-        _approve_transaction(conn, row, payload.category_id, payload.note)
-
-        if payload.save_rule:
-            pattern = payload.rule_pattern or row["counterparty"] or row["description"]
-            if pattern:
-                conn.execute(
-                    "INSERT INTO category_rules (pattern, category_id, created_at) VALUES (?, ?, ?)",
-                    (pattern, payload.category_id, _now()),
-                )
-
-        conn.commit()
-        updated = conn.execute(
-            BANK_TRANSACTION_JOIN_SELECT + " WHERE t.id = ?", (txn_id,)
-        ).fetchone()
-        return row_to_bank_transaction(conn, updated)
-    finally:
-        conn.close()
-
-
-@app.post("/bank/transactions/{txn_id}/ignore", response_model=BankTransactionOut)
-def ignore_bank_transaction(txn_id: int):
-    conn = get_connection()
-    try:
-        row = conn.execute("SELECT * FROM bank_transactions WHERE id = ?", (txn_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Bank transaction not found")
-        if row["status"] != "pending":
-            raise HTTPException(status_code=409, detail=f"Transaction is already {row['status']}")
-
-        conn.execute("UPDATE bank_transactions SET status = 'ignored' WHERE id = ?", (txn_id,))
-        conn.commit()
-        updated = conn.execute(
-            BANK_TRANSACTION_JOIN_SELECT + " WHERE t.id = ?", (txn_id,)
-        ).fetchone()
-        return row_to_bank_transaction(conn, updated)
-    finally:
-        conn.close()
-
-
-@app.post("/bank/transactions/{txn_id}/mark-salary", response_model=BankTransactionOut)
-def mark_bank_transaction_salary(txn_id: int, payload: BankTransactionMarkSalary):
-    conn = get_connection()
-    try:
-        row = conn.execute("SELECT * FROM bank_transactions WHERE id = ?", (txn_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Bank transaction not found")
-        if row["status"] != "pending":
-            raise HTTPException(status_code=409, detail=f"Transaction is already {row['status']}")
-        if row["amount"] <= 0:
-            raise HTTPException(status_code=422, detail="Only incoming credits can be marked as salary")
-
-        set_salary_for_month(conn, row["booking_date"][:7], row["amount"])
-        if payload.save_rule and row["counterparty"]:
-            conn.execute(
-                "INSERT INTO salary_rules (pattern, created_at) VALUES (?, ?)",
-                (row["counterparty"], _now()),
+        category_id = row["suggested_category_id"]
+        if category_id is None:
+            category_id = suggest_category(
+                conn,
+                NormalizedTxn(
+                    external_id=row["external_id"],
+                    booking_date=row["booking_date"],
+                    value_date=row["value_date"],
+                    amount=row["amount"],
+                    currency=row["currency"],
+                    counterparty=row["counterparty"],
+                    description=row["description"],
+                    raw={},
+                ),
             )
-        conn.execute("UPDATE bank_transactions SET status = 'salary' WHERE id = ?", (txn_id,))
-        conn.commit()
+        if category_id is None:
+            raise HTTPException(status_code=409, detail="No category available")
 
+        create_expense_from_transaction(conn, row, category_id)
+        conn.commit()
         updated = conn.execute(
             BANK_TRANSACTION_JOIN_SELECT + " WHERE t.id = ?", (txn_id,)
         ).fetchone()
@@ -873,24 +861,12 @@ def mark_bank_transaction_salary(txn_id: int, payload: BankTransactionMarkSalary
         conn.close()
 
 
-@app.post("/bank/transactions/approve-bulk", response_model=list[BankTransactionOut])
-def approve_bank_transactions_bulk(payload: BankTransactionsBulkApprove):
+@app.post("/bank/backfill", response_model=BankBackfillOut)
+def backfill_bank_transactions(month: str | None = None):
+    validate_month(month)
     conn = get_connection()
     try:
-        updated_ids = []
-        for txn_id in payload.ids:
-            row = conn.execute("SELECT * FROM bank_transactions WHERE id = ?", (txn_id,)).fetchone()
-            if not row or row["status"] != "pending" or row["suggested_category_id"] is None:
-                continue
-            _approve_transaction(conn, row, row["suggested_category_id"], None)
-            updated_ids.append(txn_id)
-        conn.commit()
-
-        rows = conn.execute(
-            BANK_TRANSACTION_JOIN_SELECT + f" WHERE t.id IN ({','.join('?' * len(updated_ids))})",
-            tuple(updated_ids),
-        ).fetchall() if updated_ids else []
-        return [row_to_bank_transaction(conn, r) for r in rows]
+        return materialize_expenses(conn, month)
     finally:
         conn.close()
 

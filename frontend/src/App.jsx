@@ -1,12 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Settings, Mail, Check, Landmark, Inbox } from 'lucide-react'
 import MonthPicker from './components/MonthPicker'
-import AddExpenseForm from './components/AddExpenseForm'
 import ExpensePieChart from './components/ExpensePieChart'
 import ExpenseList from './components/ExpenseList'
 import CategoryManager from './components/CategoryManager'
 import BankConnectModal from './components/BankConnectModal'
-import ImportReviewModal from './components/ImportReviewModal'
+import ImportActivityModal from './components/ImportActivityModal'
 import ThemeToggle from './components/ThemeToggle'
 import {
   getCategories,
@@ -14,12 +13,13 @@ import {
   updateCategory,
   deleteCategory,
   getExpenses,
-  createExpense,
+  updateExpense,
   deleteExpense,
   getSummary,
   sendInsightsEmail,
   getSalary,
   updateSalary,
+  clearSalary,
   getBankConnections,
   connectBank,
   submitScraperOtp,
@@ -28,10 +28,7 @@ import {
   submitReverifyOtp,
   syncBank,
   getBankTransactions,
-  approveBankTransaction,
-  ignoreBankTransaction,
-  markBankTransactionSalary,
-  approveBankTransactionsBulk,
+  restoreBankTransaction,
 } from './api'
 
 function currentMonth() {
@@ -51,8 +48,8 @@ function App() {
   const [salary, setSalary] = useState(null)
   const [bankConnections, setBankConnections] = useState([])
   const [showBankManager, setShowBankManager] = useState(false)
-  const [pendingTxns, setPendingTxns] = useState([])
-  const [showImportReview, setShowImportReview] = useState(false)
+  const [activityTxns, setActivityTxns] = useState([])
+  const [showImportActivity, setShowImportActivity] = useState(false)
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -104,27 +101,31 @@ function App() {
       .catch(() => {})
   }, [])
 
-  const loadPendingTxns = useCallback(() => {
-    return getBankTransactions('pending')
-      .then(setPendingTxns)
+  const loadActivity = useCallback(() => {
+    return getBankTransactions(undefined, month)
+      .then(setActivityTxns)
       .catch(() => {})
-  }, [])
+  }, [month])
 
   useEffect(() => {
     loadBankConnections()
-    loadPendingTxns()
-  }, [loadBankConnections, loadPendingTxns])
+  }, [loadBankConnections])
 
-  async function handleAddExpense(expense) {
-    const created = await createExpense(expense)
-    setExpenses((prev) => [...prev, created])
-    const sum = await getSummary(month)
-    setSummary(sum)
-  }
+  useEffect(() => {
+    loadActivity()
+  }, [loadActivity])
 
   async function handleDeleteExpense(id) {
     await deleteExpense(id)
     setExpenses((prev) => prev.filter((e) => e.id !== id))
+    const sum = await getSummary(month)
+    setSummary(sum)
+    await loadActivity()
+  }
+
+  async function handleRecategorizeExpense(id, categoryId) {
+    const updated = await updateExpense(id, { category_id: categoryId, remember: true })
+    setExpenses((prev) => prev.map((e) => (e.id === id ? updated : e)))
     const sum = await getSummary(month)
     setSummary(sum)
   }
@@ -190,33 +191,21 @@ function App() {
     } finally {
       // Refetch even on failure — a failed sync (e.g. OTP_REQUIRED) flips the
       // connection's status to 'error' server-side, which is what makes the
-      // reconnect button appear.
-      await Promise.all([loadBankConnections(), loadPendingTxns()])
+      // reconnect button appear. loadMonthData matters because a sync now
+      // creates expenses directly, so the list and pie are stale without it.
+      await Promise.all([loadBankConnections(), loadActivity(), loadMonthData()])
+      setSalary(await getSalary(month))
     }
   }
 
-  async function handleApproveBankTxn(id, data) {
-    await approveBankTransaction(id, data)
-    setPendingTxns((prev) => prev.filter((t) => t.id !== id))
-    await loadMonthData()
+  async function handleRestoreBankTxn(id) {
+    await restoreBankTransaction(id)
+    await Promise.all([loadActivity(), loadMonthData()])
   }
 
-  async function handleIgnoreBankTxn(id) {
-    await ignoreBankTransaction(id)
-    setPendingTxns((prev) => prev.filter((t) => t.id !== id))
-  }
-
-  async function handleMarkBankTxnSalary(id, saveRule) {
-    await markBankTransactionSalary(id, saveRule)
-    setPendingTxns((prev) => prev.filter((t) => t.id !== id))
-    const updated = await getSalary(month)
-    setSalary(updated)
-  }
-
-  async function handleBulkApproveBankTxns(ids) {
-    await approveBankTransactionsBulk(ids)
-    setPendingTxns((prev) => prev.filter((t) => !ids.includes(t.id)))
-    await loadMonthData()
+  async function handleClearSalary() {
+    await clearSalary(month)
+    setSalary(await getSalary(month))
   }
 
   async function handleSendInsightsEmail() {
@@ -234,6 +223,10 @@ function App() {
     }
   }
 
+  // With nothing left to approve, the only thing wanting attention is spending
+  // the categorizer couldn't place.
+  const uncategorizedCount = expenses.filter((e) => e.category_name === 'Uncategorized').length
+
   return (
     <>
       <header className="app-header">
@@ -248,10 +241,10 @@ function App() {
             <Landmark size={18} />
           </button>
           <button
-            className={pendingTxns.length ? 'icon-btn header-icon-badge' : 'icon-btn'}
-            data-count={pendingTxns.length || undefined}
-            onClick={() => setShowImportReview(true)}
-            aria-label="Review imported bank transactions"
+            className={uncategorizedCount ? 'icon-btn header-icon-badge' : 'icon-btn'}
+            data-count={uncategorizedCount || undefined}
+            onClick={() => setShowImportActivity(true)}
+            aria-label="View imported bank activity"
           >
             <Inbox size={18} />
           </button>
@@ -278,16 +271,14 @@ function App() {
 
       <MonthPicker month={month} onChange={setMonth} />
 
-      <AddExpenseForm
-        month={month}
-        categories={categories}
-        onAddExpense={handleAddExpense}
-        onAddCategory={handleAddCategory}
-      />
-
       <ExpensePieChart summary={summary} />
 
-      <ExpenseList expenses={expenses} onDelete={handleDeleteExpense} />
+      <ExpenseList
+        expenses={expenses}
+        categories={categories}
+        onDelete={handleDeleteExpense}
+        onRecategorize={handleRecategorizeExpense}
+      />
 
       {showManager && (
         <CategoryManager
@@ -298,6 +289,7 @@ function App() {
           onCreate={handleAddCategory}
           salary={salary}
           onUpdateSalary={handleUpdateSalary}
+          onClearSalary={handleClearSalary}
         />
       )}
 
@@ -315,15 +307,11 @@ function App() {
         />
       )}
 
-      {showImportReview && (
-        <ImportReviewModal
-          transactions={pendingTxns}
-          categories={categories}
-          onClose={() => setShowImportReview(false)}
-          onApprove={handleApproveBankTxn}
-          onIgnore={handleIgnoreBankTxn}
-          onBulkApprove={handleBulkApproveBankTxns}
-          onMarkSalary={handleMarkBankTxnSalary}
+      {showImportActivity && (
+        <ImportActivityModal
+          transactions={activityTxns}
+          onClose={() => setShowImportActivity(false)}
+          onRestore={handleRestoreBankTxn}
         />
       )}
     </>

@@ -223,12 +223,6 @@ textarea {
   outline-offset: -1px;
 }
 
-.category-select-option {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
 .color-dot {
   display: inline-block;
   width: 10px;
@@ -299,17 +293,6 @@ textarea {
     opacity: 1;
     transform: translateY(0);
   }
-}
-
-/* Inline add-category */
-.add-category-inline {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  background: var(--color-surface-alt);
-  border: 1px dashed var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 10px;
 }
 
 .add-category-row {
@@ -912,4 +895,60 @@ textarea {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* Inline recategorize control on each expense row */
+.expense-category-select {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  font: inherit;
+  padding: 2px 6px;
+  margin-left: -6px;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.expense-category-select:hover:not(:disabled) {
+  border-color: var(--color-border);
+  background: var(--color-surface-alt);
+}
+
+.expense-category-select:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.salary-source {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.rules-hint {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin: -4px 0 8px;
+}
+
+.rule-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.rule-pattern {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.rule-category {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
 }

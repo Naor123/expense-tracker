@@ -6,13 +6,44 @@ function formatDate(dateStr) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-function ExpenseRow({ exp, onDelete }) {
+function ExpenseRow({ exp, categories, onDelete, onRecategorize }) {
+  const [categoryId, setCategoryId] = useState(exp.category_id)
+  const [saving, setSaving] = useState(false)
+
+  const dotColor = categories.find((c) => c.id === categoryId)?.color ?? exp.category_color
+
+  async function handleChange(e) {
+    const next = Number(e.target.value)
+    const previous = categoryId
+    setCategoryId(next)
+    setSaving(true)
+    try {
+      await onRecategorize(exp.id, next)
+    } catch {
+      setCategoryId(previous)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <div className="expense-row">
       <div className="expense-row-main">
         <div className="expense-row-top">
-          <span className="color-dot" style={{ background: exp.category_color }} />
-          {exp.category_name}
+          <span className="color-dot" style={{ background: dotColor }} />
+          <select
+            className="expense-category-select"
+            value={categoryId ?? ''}
+            onChange={handleChange}
+            disabled={saving || exp.is_rent}
+            aria-label="Category"
+          >
+            {categories.map((cat) => (
+              <option key={cat.id} value={cat.id}>
+                {cat.name}
+              </option>
+            ))}
+          </select>
         </div>
         <div className="expense-row-date">{formatDate(exp.date)}</div>
         {exp.note && <div className="expense-row-note">{exp.note}</div>}
@@ -25,7 +56,15 @@ function ExpenseRow({ exp, onDelete }) {
   )
 }
 
-function CollapsibleGroup({ title, items, onDelete, emptyText, defaultExpanded }) {
+function CollapsibleGroup({
+  title,
+  items,
+  categories,
+  onDelete,
+  onRecategorize,
+  emptyText,
+  defaultExpanded,
+}) {
   const [expanded, setExpanded] = useState(defaultExpanded)
 
   return (
@@ -42,14 +81,20 @@ function CollapsibleGroup({ title, items, onDelete, emptyText, defaultExpanded }
       <div className="expense-list" hidden={!expanded}>
         {items.length === 0 && <div className="empty-state">{emptyText}</div>}
         {items.map((exp) => (
-          <ExpenseRow key={exp.id} exp={exp} onDelete={onDelete} />
+          <ExpenseRow
+            key={exp.id}
+            exp={exp}
+            categories={categories}
+            onDelete={onDelete}
+            onRecategorize={onRecategorize}
+          />
         ))}
       </div>
     </div>
   )
 }
 
-export default function ExpenseList({ expenses, onDelete }) {
+export default function ExpenseList({ expenses, categories, onDelete, onRecategorize }) {
   if (!expenses.length) {
     return (
       <div className="card">
@@ -58,7 +103,7 @@ export default function ExpenseList({ expenses, onDelete }) {
           <div className="empty-state-emoji">🧾</div>
           No expenses logged for this month yet.
           <br />
-          Add your first one above.
+          Sync a bank connection from the bank icon in the header to import them.
         </div>
       </div>
     )
@@ -74,7 +119,9 @@ export default function ExpenseList({ expenses, onDelete }) {
       <CollapsibleGroup
         title="Rent"
         items={rent}
+        categories={categories}
         onDelete={onDelete}
+        onRecategorize={onRecategorize}
         emptyText="No rent expense for this month."
         defaultExpanded={false}
       />
@@ -82,18 +129,24 @@ export default function ExpenseList({ expenses, onDelete }) {
         <CollapsibleGroup
           title="Imported from Bank"
           items={imported}
+          categories={categories}
           onDelete={onDelete}
+          onRecategorize={onRecategorize}
           emptyText="No imported transactions for this month."
+          defaultExpanded={true}
+        />
+      )}
+      {other.length > 0 && (
+        <CollapsibleGroup
+          title="Other Expenses"
+          items={other}
+          categories={categories}
+          onDelete={onDelete}
+          onRecategorize={onRecategorize}
+          emptyText="No one-off expenses logged for this month yet."
           defaultExpanded={false}
         />
       )}
-      <CollapsibleGroup
-        title="Other Expenses"
-        items={other}
-        onDelete={onDelete}
-        emptyText="No one-off expenses logged for this month yet."
-        defaultExpanded={false}
-      />
     </>
   )
 }

@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { X, Save, Trash2, Plus, Pencil, Check } from 'lucide-react'
+import { getCategoryRules, deleteCategoryRule } from '../api'
 
 export default function CategoryManager({
   categories,
@@ -9,6 +10,7 @@ export default function CategoryManager({
   onCreate,
   salary,
   onUpdateSalary,
+  onClearSalary,
 }) {
   const [edits, setEdits] = useState({})
   const [errors, setErrors] = useState({})
@@ -19,6 +21,44 @@ export default function CategoryManager({
   const [salaryAmount, setSalaryAmount] = useState('')
   const [salarySubmitting, setSalarySubmitting] = useState(false)
   const [salaryError, setSalaryError] = useState('')
+  const [rules, setRules] = useState([])
+  const [rulesError, setRulesError] = useState('')
+
+  useEffect(() => {
+    let active = true
+    getCategoryRules()
+      .then((data) => {
+        if (active) setRules(data)
+      })
+      .catch(() => {
+        if (active) setRulesError('Could not load learned rules.')
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  async function handleDeleteRule(rule) {
+    setRulesError('')
+    try {
+      await deleteCategoryRule(rule.id)
+      setRules((prev) => prev.filter((r) => r.id !== rule.id))
+    } catch {
+      setRulesError('Could not delete rule.')
+    }
+  }
+
+  async function handleClearSalary() {
+    setSalarySubmitting(true)
+    setSalaryError('')
+    try {
+      await onClearSalary()
+    } catch {
+      setSalaryError('Could not clear the manual salary.')
+    } finally {
+      setSalarySubmitting(false)
+    }
+  }
 
   function startEditSalary() {
     setSalaryAmount(salary?.amount != null ? String(salary.amount) : '')
@@ -106,9 +146,19 @@ export default function CategoryManager({
             <span className="salary-amount">
               {salary?.amount != null ? `₪${salary.amount.toFixed(2)}` : 'Not set'}
             </span>
+            {salary?.source && (
+              <span className="salary-source">
+                {salary.source === 'auto' ? 'detected' : 'set manually'}
+              </span>
+            )}
             <button className="icon-btn" onClick={startEditSalary} aria-label="Edit net salary">
               <Pencil size={16} />
             </button>
+            {salary?.source === 'manual' && (
+              <button className="inline-btn" onClick={handleClearSalary} disabled={salarySubmitting}>
+                Use detected
+              </button>
+            )}
           </div>
         ) : (
           <div className="salary-edit">
@@ -184,6 +234,30 @@ export default function CategoryManager({
           </div>
           {createError && <p className="category-manager-error">{createError}</p>}
         </div>
+
+        <h3 className="card-title">Learned rules</h3>
+        <p className="rules-hint">
+          Created automatically when you change an imported expense&apos;s category.
+        </p>
+        <div className="category-manager-list">
+          {rules.length === 0 && (
+            <div className="empty-state">No rules learned yet.</div>
+          )}
+          {rules.map((rule) => (
+            <div className="rule-row" key={rule.id}>
+              <span className="rule-pattern">{rule.pattern}</span>
+              <span className="rule-category">{rule.category_name}</span>
+              <button
+                className="delete-btn"
+                onClick={() => handleDeleteRule(rule)}
+                aria-label={`Delete rule for ${rule.pattern}`}
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+        {rulesError && <p className="category-manager-error">{rulesError}</p>}
       </div>
     </div>
   )

@@ -19,11 +19,9 @@ class CategoryOut(BaseModel):
     color: str
 
 
-class ExpenseCreate(BaseModel):
-    amount: float = Field(gt=0)
+class ExpenseUpdate(BaseModel):
     category_id: int
-    date: str
-    note: Optional[str] = None
+    remember: bool = True
 
 
 class ExpenseOut(BaseModel):
@@ -65,6 +63,7 @@ class SalaryUpdate(BaseModel):
 class SalaryOut(BaseModel):
     month: str
     amount: Optional[float] = None
+    source: Optional[str] = None
 
 
 class BankConnectCreate(BaseModel):
@@ -104,6 +103,15 @@ class BankSyncOut(BaseModel):
     fetched: int
     inserted: int
     skipped: int
+    imported: int = 0
+    ignored: int = 0
+    salary: int = 0
+
+
+class BankBackfillOut(BaseModel):
+    imported: int
+    ignored: int
+    salary: int
 
 
 class BankTransactionOut(BaseModel):
@@ -122,24 +130,9 @@ class BankTransactionOut(BaseModel):
     suggested_category_id: Optional[int] = None
     suggested_category_name: Optional[str] = None
     expense_id: Optional[int] = None
-    possible_duplicate: bool = False
+    ignore_reason: Optional[str] = None
     connection_company_id: Optional[str] = None
     connection_label: Optional[str] = None
-
-
-class BankTransactionApprove(BaseModel):
-    category_id: int
-    note: Optional[str] = None
-    save_rule: bool = False
-    rule_pattern: Optional[str] = None
-
-
-class BankTransactionMarkSalary(BaseModel):
-    save_rule: bool = False
-
-
-class BankTransactionsBulkApprove(BaseModel):
-    ids: list[int]
 
 
 class CategoryRuleCreate(BaseModel):

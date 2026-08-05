@@ -13,8 +13,8 @@ export const deleteCategory = (id) => api.delete(`/categories/${id}`)
 
 export const getExpenses = (month) =>
   api.get('/expenses', { params: { month } }).then((r) => r.data)
-export const createExpense = (expense) =>
-  api.post('/expenses', expense).then((r) => r.data)
+export const updateExpense = (id, data) =>
+  api.patch(`/expenses/${id}`, data).then((r) => r.data)
 export const deleteExpense = (id) => api.delete(`/expenses/${id}`)
 
 export const getSummary = (month) =>
@@ -29,6 +29,7 @@ export const getSalary = (month) =>
   api.get('/salary', { params: { month } }).then((r) => r.data)
 export const updateSalary = (month, amount) =>
   api.put('/salary', { amount }, { params: { month } }).then((r) => r.data)
+export const clearSalary = (month) => api.delete('/salary', { params: { month } })
 
 export const getBankConnections = () => api.get('/bank/connections').then((r) => r.data)
 export const connectBank = (payload) => api.post('/bank/connect', payload).then((r) => r.data)
@@ -46,16 +47,12 @@ export const submitReverifyOtp = (id, sessionId, otpCode) =>
 export const syncBank = (connectionId, month) =>
   api.post('/bank/sync', null, { params: { connection_id: connectionId, month } }).then((r) => r.data)
 
-export const getBankTransactions = (status) =>
-  api.get('/bank/transactions', { params: { status } }).then((r) => r.data)
-export const approveBankTransaction = (id, data) =>
-  api.post(`/bank/transactions/${id}/approve`, data).then((r) => r.data)
-export const ignoreBankTransaction = (id) =>
-  api.post(`/bank/transactions/${id}/ignore`).then((r) => r.data)
-export const markBankTransactionSalary = (id, saveRule) =>
-  api.post(`/bank/transactions/${id}/mark-salary`, { save_rule: saveRule }).then((r) => r.data)
-export const approveBankTransactionsBulk = (ids) =>
-  api.post('/bank/transactions/approve-bulk', { ids }).then((r) => r.data)
+export const getBankTransactions = (status, month) =>
+  api.get('/bank/transactions', { params: { status, month } }).then((r) => r.data)
+export const restoreBankTransaction = (id) =>
+  api.post(`/bank/transactions/${id}/restore`).then((r) => r.data)
+export const backfillBankTransactions = (month) =>
+  api.post('/bank/backfill', null, { params: { month } }).then((r) => r.data)
 
 export const getCategoryRules = () => api.get('/category-rules').then((r) => r.data)
 export const createCategoryRule = (pattern, categoryId) =>
