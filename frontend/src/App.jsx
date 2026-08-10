@@ -33,7 +33,16 @@ import {
 
 function currentMonth() {
   const now = new Date()
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+  let year = now.getFullYear()
+  let month = now.getMonth() + 1
+  if (now.getDate() < 10) {
+    month -= 1
+    if (month === 0) {
+      month = 12
+      year -= 1
+    }
+  }
+  return `${year}-${String(month).padStart(2, '0')}`
 }
 
 function App() {
