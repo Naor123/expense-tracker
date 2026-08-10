@@ -9,7 +9,7 @@ from bank.importer import materialize_expenses
 from bank.psd2 import Psd2Client
 from bank.scraper import ScraperClient
 from bank.types import NormalizedTxn
-from db import bucket_month, month_window
+from db import bucket_month, month_window, previous_month
 
 
 def _now() -> str:
@@ -137,7 +137,14 @@ def sync_bank_transactions(conn, connection_id: int, month: str) -> dict:
     if not connection:
         raise BankConfigError(f"no bank_connections row with id {connection_id}")
 
-    date_from, _ = month_window(month)
+    # Fetch from the start of the PRIOR bucket, not this one's own window start.
+    # A sync scoped to the month that just opened (date_from == today, right at
+    # the 10th) would otherwise never even ask the source for the tail end of
+    # the previous cycle — store_transactions' target_month filter can't save
+    # data that was never fetched in the first place. Over-fetching here is
+    # safe: target_month still discards anything outside `month`, and
+    # INSERT OR IGNORE makes re-fetched rows a no-op.
+    date_from, _ = month_window(previous_month(month))
     date_to = date.today().isoformat()
 
     try:

@@ -1,5 +1,6 @@
+import bank.sync as sync_module
 from bank.scraper import _map_card_itemized_transaction
-from bank.sync import store_card_itemized_transactions, store_transactions
+from bank.sync import store_card_itemized_transactions, store_transactions, sync_bank_transactions
 from bank.types import NormalizedTxn
 
 
@@ -118,6 +119,34 @@ def test_store_card_itemized_transactions_splits_by_origin(conn, bank_connection
         "SELECT kind, settlement FROM bank_transactions WHERE external_id = 'card-international'"
     ).fetchone()
     assert (intl_row["kind"], intl_row["settlement"]) == ("credit_card_charge", "immediate")
+
+
+def test_sync_fetches_from_the_prior_bucket_not_just_the_selected_month(conn, monkeypatch):
+    # 2026-08's own window starts 2026-08-10. A sync scoped to '2026-08' that
+    # only fetched from there would miss Aug 4-9, which buckets into July —
+    # never even reaching store_transactions' target_month filter, since it
+    # was never fetched at all. date_from must reach back into the prior
+    # bucket's window.
+    cur = conn.execute(
+        """
+        INSERT INTO bank_connections (provider, label, account_ref, status, secrets_enc, created_at)
+        VALUES ('scraper', 'Test Bank', 'acc-1', 'valid', '{}', '2026-01-01')
+        """
+    )
+    conn.commit()
+    connection_id = cur.lastrowid
+
+    captured = {}
+
+    def fake_fetch_scraper(conn_, connection, date_from):
+        captured["date_from"] = date_from
+        return [], []
+
+    monkeypatch.setattr(sync_module, "_fetch_scraper", fake_fetch_scraper)
+
+    sync_bank_transactions(conn, connection_id, "2026-08")
+
+    assert captured["date_from"] == "2026-07-10"
 
 
 def test_map_card_itemized_transaction():
