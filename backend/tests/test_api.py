@@ -1,7 +1,10 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
 from bank.importer import materialize_expenses
+from bank.types import BankAccount
 from tests.test_importer import stage
 
 
@@ -136,3 +139,48 @@ def test_listing_transactions_by_month_uses_the_billing_window(client, conn, ban
 
     rows = client.get("/bank/transactions", params={"month": "2026-07"}).json()
     assert [r["external_id"] for r in rows] == ["tx-in"]
+
+
+def test_reverify_passes_stored_device_trust_data_to_start_login(client, conn, monkeypatch):
+    # Regression: reverify_bank_connection decrypted secrets_enc to read
+    # credentials but silently dropped device_trust_data, so every reconnect
+    # presented as a brand-new unrecognized device to the bank and could
+    # trigger OTP even when a still-valid device trust cookie was on hand —
+    # defeating the whole point of persisting it after the first login.
+    from bank import crypto
+
+    secrets = crypto.encrypt(json.dumps({
+        "credentials": {"userCode": "u", "password": "p"},
+        "device_trust_data": {"cookie": "abc123"},
+    }))
+    cur = conn.execute(
+        """
+        INSERT INTO bank_connections (provider, company_id, label, account_ref, status, secrets_enc, created_at)
+        VALUES ('scraper', 'hapoalim', 'Test Hapoalim', 'acc-1', 'valid', ?, '2026-01-01')
+        """,
+        (secrets,),
+    )
+    conn.commit()
+    connection_id = cur.lastrowid
+
+    captured = {}
+
+    class FakeScraperClient:
+        def start_login(self, credentials, start_date, device_trust_data=None, company_id=None):
+            captured["device_trust_data"] = device_trust_data
+            return {
+                "status": "success",
+                "credentials": credentials,
+                "company_id": company_id,
+                "accounts": [BankAccount(account_ref="acc-1", name="acc-1")],
+                "transactions_by_account": {"acc-1": []},
+                "card_itemized_by_account": {"acc-1": []},
+                "device_trust_data": {"cookie": "refreshed"},
+            }
+
+    import main
+    monkeypatch.setattr(main, "ScraperClient", FakeScraperClient)
+
+    response = client.post(f"/bank/connections/{connection_id}/reverify")
+    assert response.status_code == 200
+    assert captured["device_trust_data"] == {"cookie": "abc123"}

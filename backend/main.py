@@ -759,7 +759,10 @@ def reverify_bank_connection(connection_id: int):
             raise HTTPException(status_code=422, detail="No stored credentials for this connection")
 
         try:
-            result = ScraperClient().start_login(credentials, _month_start(), company_id=row["company_id"])
+            result = ScraperClient().start_login(
+                credentials, _month_start(),
+                device_trust_data=secrets.get("device_trust_data"), company_id=row["company_id"],
+            )
         except BankAuthError as e:
             raise HTTPException(status_code=401, detail=str(e))
 

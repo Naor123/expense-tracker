@@ -1,5 +1,5 @@
 diff --git a/src/scrapers/hapoalim.ts b/src/scrapers/hapoalim.ts
-index 232b99c..868d2da 100644
+index 232b99c..2976a7b 100644
 --- a/src/scrapers/hapoalim.ts
 +++ b/src/scrapers/hapoalim.ts
 @@ -5,7 +5,13 @@ import { getDebug } from '../helpers/debug';
@@ -17,20 +17,49 @@ index 232b99c..868d2da 100644
  import { BaseScraperWithBrowser, LoginResults, type PossibleLoginResults } from './base-scraper-with-browser';
  import { ScraperErrorTypes } from './errors';
  import { type ScraperLoginResult, type ScraperOptions } from './interface';
-@@ -201,6 +207,50 @@ async function getAccountBalance(apiSiteUrl: string, page: Page, accountNumber:
+@@ -201,6 +207,101 @@ async function getAccountBalance(apiSiteUrl: string, page: Page, accountNumber:
    return balanceAndCreditLimit?.currentBalance;
  }
  
++async function writeCardItemizedDebug(entry: Record<string, unknown>) {
++  // Always-on diagnostic (unlike runCurrentDebitDiagnostic, which is gated
++  // behind DIAGNOSE_CURRENT_DEBIT and only captures a separate UI-page-visit
++  // path, not this function). fetchCardItemizedCharges's own failures/empty
++  // results were previously invisible: the debug() calls below go through the
++  // `debug` npm package, which is silent unless a DEBUG env var names this
++  // namespace — nothing in this project's setup sets one, so every prior
++  // failure or "zero cards/totals found" case left no trace anywhere. This
++  // writes unconditionally so the next live run is diagnosable without
++  // needing to re-wire logging first.
++  try {
++    const fs = await import('fs');
++    const line = JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n';
++    fs.appendFileSync('card-itemized-debug.log', line);
++  } catch {
++    // best-effort only — must never break the real fetch
++  }
++}
++
 +async function fetchCardItemizedCharges(
 +  apiSiteUrl: string,
 +  page: Page,
 +  accountNumber: string,
 +): Promise<CardItemizedCharge[]> {
++  // Tried navigating to the card page first (on the theory that a session
++  // which never visits the card module in the UI leaves some per-module
++  // state uninitialized) — confirmed live that this actively breaks the
++  // in-page fetch() calls below instead: the SPA route change appears to
++  // reset whatever wraps window.fetch (clarisite/detector-dom.min.js shows
++  // up in the resulting stack), so the very next fetchGetWithinPage call
++  // throws "Failed to fetch". Removed. The REST calls are plain GETs against
++  // apiSiteUrl and don't need any page navigation first.
 +  const totalsUrl = `${apiSiteUrl}/cards/transactions-totals?accountId=${accountNumber}&transactionsType=current&lang=he`;
 +  const totals = await fetchGetWithinPage<any>(page, totalsUrl);
-+  const cards = (totals?.cards ?? []).filter((c: any) => c.cardIdentification?.nonBankCardInd === false);
++  const allCards = totals?.cards ?? [];
++  const cards = allCards.filter((c: any) => c.cardIdentification?.nonBankCardInd === false);
 +
 +  const charges: CardItemizedCharge[] = [];
++  const cardSummaries: Record<string, unknown>[] = [];
 +  for (const card of cards) {
 +    const ident = card.cardIdentification;
 +    const balances = card.cardBookedBalances ?? {};
@@ -38,6 +67,7 @@ index 232b99c..868d2da 100644
 +      { list: balances.nationalTransactionsTotal ?? [], origin: 1 },
 +      { list: balances.internationalTransactionsTotal ?? [], origin: 2 },
 +    ];
++    const cardSummary: Record<string, unknown> = { cardSuffix: ident?.cardSuffix, entries: [] as unknown[] };
 +    for (const { list, origin } of groups) {
 +      for (const total of list) {
 +        const debitDate = total.debitDate;
@@ -47,9 +77,20 @@ index 232b99c..868d2da 100644
 +          `&cardIdServiceProvider=${ident.cardIdServiceProvider}&transactionsType=current&totalInd=1` +
 +          `&debitDate=${debitDate}&eventCurrencyDescription=NIS&debitEventOrigin=${origin}` +
 +          `&offset=0&limit=50&cardIdHapoalim=${ident.cardIdHapoalim}&lang=he`;
-+        const detail = await fetchGetWithinPage<any>(page, detailUrl);
++        // One bad (card, debitDate) fetch must not discard every other entry
++        // already gathered — without this, a single transient failure (seen
++        // live) silently zeroed out the whole account's itemized charges.
++        let detail: any;
++        try {
++          detail = await fetchGetWithinPage<any>(page, detailUrl);
++        } catch (e) {
++          (cardSummary.entries as unknown[]).push({ debitDate, origin, error: e instanceof Error ? e.message : String(e) });
++          continue;
++        }
 +        const txnGroup = origin === 1 ? detail?.card?.nationalTransactions : detail?.card?.internationalTransactions;
-+        for (const t of txnGroup?.[0]?.transactionsDetails ?? []) {
++        const details = txnGroup?.[0]?.transactionsDetails ?? [];
++        (cardSummary.entries as unknown[]).push({ debitDate, origin, detailCount: details.length });
++        for (const t of details) {
 +          charges.push({
 +            externalId: `card-${ident.cardSuffix}-${t.transactionRreferance}-${debitDate}`,
 +            merchantName: t.merchantDetails?.merchantName ?? null,
@@ -61,14 +102,24 @@ index 232b99c..868d2da 100644
 +        }
 +      }
 +    }
++    cardSummaries.push(cardSummary);
 +  }
++
++  await writeCardItemizedDebug({
++    accountNumber,
++    totalCardsReturned: allCards.length,
++    nonBankCardsUsed: cards.length,
++    cardSummaries,
++    chargesFound: charges.length,
++  });
++
 +  return charges;
 +}
 +
  async function fetchAccountData(page: Page, baseUrl: string, options: ScraperOptions) {
    const restContext = await getRestContext(page);
    const apiSiteUrl = `${baseUrl}/${restContext}`;
-@@ -241,10 +291,18 @@ async function fetchAccountData(page: Page, baseUrl: string, options: ScraperOpt
+@@ -241,10 +342,19 @@ async function fetchAccountData(page: Page, baseUrl: string, options: ScraperOpt
        options,
      );
  
@@ -77,6 +128,7 @@ index 232b99c..868d2da 100644
 +      cardItemizedCharges = await fetchCardItemizedCharges(apiSiteUrl, page, accountNumber);
 +    } catch (e) {
 +      debug('failed to fetch card itemized charges for account %s: %s', accountNumber, e);
++      await writeCardItemizedDebug({ accountNumber, error: e instanceof Error ? e.message : String(e) });
 +    }
 +
      accounts.push({
@@ -87,7 +139,7 @@ index 232b99c..868d2da 100644
      });
    }
  
-@@ -266,6 +324,11 @@ function getPossibleLoginResults(baseUrl: string) {
+@@ -266,6 +376,11 @@ function getPossibleLoginResults(baseUrl: string) {
      `${baseUrl}/portalserver/HomePage`,
      `${baseUrl}/ng-portals-bt/rb/he/homepage`,
      `${baseUrl}/ng-portals/rb/he/homepage`,
@@ -99,7 +151,7 @@ index 232b99c..868d2da 100644
    ];
    urls[LoginResults.InvalidPassword] = [
      `${baseUrl}/AUTHENTICATE/LOGON?flow=AUTHENTICATE&state=LOGON&errorcode=1.6&callme=false`,
-@@ -328,10 +391,53 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
+@@ -328,10 +443,53 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
      };
    }
  
@@ -154,7 +206,7 @@ index 232b99c..868d2da 100644
        return result;
      }
  
-@@ -391,11 +497,14 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
+@@ -391,11 +549,14 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
        }
  
        if (!(await this.page.$(OTP_FORM_SELECTOR))) {
@@ -170,7 +222,7 @@ index 232b99c..868d2da 100644
          ];
          try {
            await waitUntil(
-@@ -409,6 +518,14 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
+@@ -409,6 +570,14 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
              1000,
            );
            debug('OTP verification succeeded');
