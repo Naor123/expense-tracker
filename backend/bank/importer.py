@@ -90,6 +90,14 @@ def _has_generated_rent(conn, booking_date: str) -> bool:
 
 
 def _ignore_reason_for(conn, row) -> Optional[str]:
+    # A card's foreign-currency-wallet purchase (e.g. "chargedCurrency": "EUR")
+    # is denominated and stored in that currency, not ILS — the real ILS money
+    # left the account already, via the "רכישת מט"ח" top-up that funded the
+    # wallet. Importing this row too would double-count that spend (and at
+    # the wrong scale, since its amount isn't shekels). Same reasoning covers
+    # positive (refund) rows in bank.salary.recompute_salary_for_month.
+    if row["currency"] and row["currency"] != "ILS":
+        return "fx_wallet_charge"
     if row["kind"] == "credit_card_payment" and (
         _has_active_credit_card_connection(conn, row["connection_id"])
         or _has_itemized_charge_for_debit_date(conn, row["connection_id"], row["value_date"])

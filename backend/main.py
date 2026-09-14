@@ -337,10 +337,26 @@ def compute_summary(conn, month: str) -> dict:
     ).fetchone()
     pending_settlement = round(pending_row["amount"] or 0, 2)
 
+    # Non-salary positive credits (reserve-duty pay, a bank/card refund, ...)
+    # are real incoming money too -- tallied separately from salary rather
+    # than dropped, since ignore_reason there just means "not the primary
+    # salary line", not "doesn't count".
+    income_row = conn.execute(
+        """
+        SELECT SUM(amount) AS amount
+        FROM bank_transactions
+        WHERE status = 'ignored' AND ignore_reason IN ('incoming_credit', 'card_refund')
+              AND booking_date >= ? AND booking_date < ?
+        """,
+        (start, end),
+    ).fetchone()
+    extra_income = round(income_row["amount"] or 0, 2)
+
     return {
         "month": month,
         "total": round(total, 2),
         "pending_settlement": pending_settlement,
+        "extra_income": extra_income,
         "categories": categories,
     }
 

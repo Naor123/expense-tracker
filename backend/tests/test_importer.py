@@ -6,16 +6,16 @@ from db import RENT_AMOUNT
 
 def stage(conn, connection_id, external_id, amount, booking_date="2026-07-15",
           value_date=None, kind="bank_transfer", settlement="immediate",
-          counterparty="Test Merchant", status="new"):
+          counterparty="Test Merchant", status="new", currency="ILS"):
     cur = conn.execute(
         """
         INSERT INTO bank_transactions
             (connection_id, external_id, booking_date, value_date, amount, currency,
              counterparty, description, raw_json, status, kind, settlement, created_at)
-        VALUES (?, ?, ?, ?, ?, 'ILS', ?, '', '{}', ?, ?, ?, '2026-01-01T00:00:00+00:00')
+        VALUES (?, ?, ?, ?, ?, ?, ?, '', '{}', ?, ?, ?, '2026-01-01T00:00:00+00:00')
         """,
-        (connection_id, external_id, booking_date, value_date, amount, counterparty,
-         status, kind, settlement),
+        (connection_id, external_id, booking_date, value_date, amount, currency,
+         counterparty, status, kind, settlement),
     )
     conn.commit()
     return cur.lastrowid
@@ -171,6 +171,25 @@ def test_itemized_duplicate_ignores_delayed_card_charges(conn, bank_connection):
 
     assert status_of(conn, bank_row)[0] == "imported"
     assert expense_count(conn) == 2
+
+
+def test_fx_wallet_charge_is_ignored_not_imported(conn, bank_connection):
+    # A foreign-currency-wallet purchase abroad (e.g. EUR) is already covered
+    # by the ILS "רכישת מט"ח" top-up that funded the wallet -- importing this
+    # row too would double-count that spend, at the wrong scale besides.
+    txn_id = stage(
+        conn, bank_connection, "tx-eur", -1.0, kind="credit_card_charge",
+        settlement="immediate", counterparty="TZORGIS MICHALIS RODOS GR", currency="EUR",
+    )
+    topup_id = stage(
+        conn, bank_connection, "tx-topup", -1072.05, kind="credit_card_charge",
+        settlement="immediate", counterparty='רכישת מט"ח',
+    )
+    materialize_expenses(conn, "2026-07")
+
+    assert status_of(conn, txn_id) == ("ignored", "fx_wallet_charge")
+    assert status_of(conn, topup_id)[0] == "imported"
+    assert expense_count(conn) == 1
 
 
 def test_category_is_assigned_from_rules_over_seed_keywords(conn, bank_connection):

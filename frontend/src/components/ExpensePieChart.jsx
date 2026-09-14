@@ -29,6 +29,7 @@ export default function ExpensePieChart({ summary }) {
 
   const pendingSettlement = summary.pending_settlement || 0
   const alreadySpent = summary.total - pendingSettlement
+  const extraIncome = summary.extra_income || 0
 
   function startEditLabel() {
     setLabelDraft(label)
@@ -67,6 +68,11 @@ export default function ExpensePieChart({ summary }) {
           <div className="summary-settlement-breakdown">
             <span>₪{formatCurrency(alreadySpent)} already left your account</span>
             <span>₪{formatCurrency(pendingSettlement)} due by the 10th</span>
+          </div>
+        )}
+        {extraIncome > 0 && (
+          <div className="summary-extra-income">
+            +₪{formatCurrency(extraIncome)} extra income this month
           </div>
         )}
       </div>

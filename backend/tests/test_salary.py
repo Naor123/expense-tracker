@@ -83,3 +83,15 @@ def test_salary_carries_forward_to_later_months(conn, bank_connection):
     recompute_salary_for_month(conn, "2026-07")
 
     assert get_salary_for_month(conn, "2026-09") == 17146.21
+
+
+def test_fx_wallet_credit_never_becomes_salary_or_income(conn, bank_connection):
+    # A EUR wallet refund is stored in EUR, not ILS -- treating its raw digit
+    # as shekels would be wrong, and it isn't real new ILS income either (the
+    # ILS side already moved via the top-up), so it must be excluded entirely.
+    eur_credit = stage(conn, bank_connection, "tx-eur-refund", 300.0, currency="EUR")
+    real_salary = stage(conn, bank_connection, "tx-salary", 17146.21)
+    recompute_salary_for_month(conn, "2026-07")
+
+    assert status_of(conn, eur_credit) == ("ignored", "fx_wallet_charge")
+    assert status_of(conn, real_salary)[0] == "salary"

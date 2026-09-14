@@ -25,19 +25,25 @@ def format_month_name(month: str) -> str:
 def build_email_body(month: str, summary: dict, salary: float) -> tuple[str, str]:
     month_label = format_month_name(month)
     total = summary["total"]
-    remaining = salary - total
-    percent_used = round((total / salary * 100), 1) if salary else 0
+    extra_income = summary.get("extra_income", 0)
+    budget = salary + extra_income
+    remaining = budget - total
+    percent_used = round((total / budget * 100), 1) if budget else 0
 
     if remaining >= 0:
-        status_line = f"Remaining: ₪{remaining:,.2f} ({percent_used}% of salary spent)"
+        status_line = f"Remaining: ₪{remaining:,.2f} ({percent_used}% of budget spent)"
     else:
-        status_line = f"Over budget by: ₪{abs(remaining):,.2f} ({percent_used}% of salary spent)"
+        status_line = f"Over budget by: ₪{abs(remaining):,.2f} ({percent_used}% of budget spent)"
 
     lines = [
         f"Expense Summary — {month_label}",
         "",
         f"Total spent: ₪{total:,.2f}",
         f"Salary: ₪{salary:,.2f}",
+    ]
+    if extra_income:
+        lines.append(f"Extra income: ₪{extra_income:,.2f}")
+    lines += [
         status_line,
         "",
         "By category:",

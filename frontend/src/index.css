@@ -414,6 +414,12 @@ textarea {
   color: var(--color-text-muted);
 }
 
+.summary-extra-income {
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: var(--color-success);
+}
+
 .chart-empty {
   text-align: center;
   color: var(--color-text-muted);

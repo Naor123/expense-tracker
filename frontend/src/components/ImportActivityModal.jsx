@@ -21,6 +21,7 @@ const IGNORE_REASONS = {
   card_lump_sum: 'Already itemized as individual card charges',
   rent_duplicate: 'Rent is tracked separately',
   itemized_duplicate: 'Same charge already imported from the card',
+  fx_wallet_charge: 'Foreign-currency wallet activity — already counted in the currency top-up',
   incoming_credit: 'Incoming credit, not this month’s salary',
   card_refund: 'Card refund',
   user_deleted: 'You deleted this',

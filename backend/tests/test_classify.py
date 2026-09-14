@@ -52,3 +52,13 @@ def test_same_day_settlement_on_the_9th_is_immediate_not_delayed():
     # A plain bank_transfer's booking_date == value_date is a coincidence of
     # calendar, not a sign it's riding the card cycle -- there's no gap at all.
     assert classify_settlement("2026-07-09", "2026-07-09") == "immediate"
+
+
+def test_month_end_purchase_settling_a_couple_days_later_is_immediate_even_across_months():
+    # A currency-wallet top-up (e.g. "רכישת מט"ח") booked right at month-end
+    # settles a day or two later, same as any other immediate charge -- that
+    # lag can push value_date into the 1st of the next month by pure
+    # coincidence of the calendar, which must not be read as "delayed" just
+    # because the month label changed.
+    assert classify_settlement("2026-08-30", "2026-09-01") == "immediate"
+    assert classify_settlement("2026-08-31", "2026-09-01") == "immediate"

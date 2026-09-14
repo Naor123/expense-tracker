@@ -23,10 +23,23 @@ def recompute_salary_for_month(conn, month: str):
     refund from becoming "salary" and then propagating forward through
     get_salary_for_month's carry-forward lookup."""
     start, end = month_window(month)
+    # Foreign-currency-wallet credits (e.g. a EUR merchant refund) are stored
+    # in that wallet's own currency, not ILS -- they never became real ILS
+    # income (the ILS side already moved via the top-up), so they must never
+    # win salary or feed extra_income at the wrong scale. Same reasoning as
+    # the fx_wallet_charge ignore gate for debits in bank.importer.
+    conn.execute(
+        """
+        UPDATE bank_transactions SET status = 'ignored', ignore_reason = 'fx_wallet_charge'
+        WHERE amount > 0 AND currency != 'ILS' AND booking_date >= ? AND booking_date < ?
+        """,
+        (start, end),
+    )
+
     credits = conn.execute(
         """
         SELECT id, amount, kind FROM bank_transactions
-        WHERE amount > 0 AND booking_date >= ? AND booking_date < ?
+        WHERE amount > 0 AND currency = 'ILS' AND booking_date >= ? AND booking_date < ?
         ORDER BY amount DESC, id ASC
         """,
         (start, end),

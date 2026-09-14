@@ -29,3 +29,28 @@ def test_map_transaction_uses_israel_local_date_not_utc_date():
     })
     assert txn.booking_date == "2026-08-02"
     assert txn.value_date == "2026-08-10"
+
+
+def test_map_transaction_uses_charged_currency_not_hardcoded_ils():
+    # A foreign-currency-wallet purchase abroad reports chargedAmount in the
+    # wallet's own currency (e.g. EUR), not ILS -- treating it as ILS
+    # understates the real spend by roughly the exchange rate.
+    txn = _map_transaction({
+        "identifier": "tx-1",
+        "date": "2026-08-01T21:00:00.000Z",
+        "chargedAmount": -1.0,
+        "chargedCurrency": "EUR",
+        "description": "TZORGIS MICHALIS       RODOS         GR",
+    })
+    assert txn.amount == -1.0
+    assert txn.currency == "EUR"
+
+
+def test_map_transaction_defaults_to_ils_when_currency_missing():
+    txn = _map_transaction({
+        "identifier": "tx-1",
+        "date": "2026-08-01T21:00:00.000Z",
+        "chargedAmount": -64.0,
+        "description": "WOLT",
+    })
+    assert txn.currency == "ILS"

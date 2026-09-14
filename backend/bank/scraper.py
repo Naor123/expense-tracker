@@ -195,7 +195,7 @@ def _map_transaction(t: dict) -> NormalizedTxn:
         booking_date=_local_date(str(t.get("date", ""))),
         value_date=_local_date(str(t.get("processedDate", ""))) or None,
         amount=float(t.get("chargedAmount", 0)),
-        currency="ILS",
+        currency=t.get("chargedCurrency") or "ILS",
         counterparty=t.get("description"),
         description=t.get("memo"),
         raw=t,
