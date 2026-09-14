@@ -54,3 +54,28 @@ def test_map_transaction_defaults_to_ils_when_currency_missing():
         "description": "WOLT",
     })
     assert txn.currency == "ILS"
+
+
+def test_map_transaction_folds_date_into_external_id_even_with_an_identifier():
+    # Hapoalim reuses the same small "identifier" every month for a recurring
+    # bank-feed line (e.g. the monthly card-company bulk debit) -- a bare
+    # identifier would make every month's occurrence collide under
+    # UNIQUE(connection_id, external_id) and silently vanish after the first.
+    july = _map_transaction({
+        "identifier": "1484", "date": "2026-07-11T21:00:00.000Z",
+        "chargedAmount": -46.37, "description": "מסטרקרד",
+    })
+    september = _map_transaction({
+        "identifier": "1484", "date": "2026-09-05T21:00:00.000Z",
+        "chargedAmount": -22.4, "description": "מסטרקרד",
+    })
+    assert july.external_id != september.external_id
+
+
+def test_map_transaction_without_identifier_still_falls_back_to_composite_key():
+    txn = _map_transaction({
+        "date": "2026-08-01T21:00:00.000Z",
+        "chargedAmount": -64.0,
+        "description": "WOLT",
+    })
+    assert txn.external_id == "2026-08-01T21:00:00.000Z--64.0-WOLT"

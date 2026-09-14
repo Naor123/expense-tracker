@@ -83,7 +83,7 @@ def store_transactions(
         if target_month and bucket_month(txn.booking_date) != target_month:
             continue
         settlement = force_settlement or classify_settlement(txn.booking_date, txn.value_date)
-        kind = force_kind or classify_transaction(txn.counterparty, txn.description, company_id, settlement)
+        kind = force_kind or classify_transaction(txn.counterparty, txn.description, company_id)
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO bank_transactions

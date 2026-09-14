@@ -18,24 +18,31 @@ CREDIT_CARD_COMPANY_NAME_FRAGMENTS = [
 ]
 
 
-def classify_transaction(counterparty: str, description: str, company_id: str, settlement: str) -> str:
+def classify_transaction(counterparty: str, description: str, company_id: str) -> str:
     """Returns 'credit_card_charge' (itemized purchase from a card connection),
     'credit_card_payment' (a bank account's lump-sum debit to a card company —
     the same spending as credit_card_charge rows, just unitemized), or
     'bank_transfer' (everything else on a bank account: transfers, standing
     orders, checks, direct debits).
 
-    A name-fragment match only counts as the bulk payment when settlement is
-    'delayed' — the once-a-month lump sum really does ride the delayed cycle.
-    A same-day (immediate) match against a card network name is an individual
-    foreign-currency purchase that happens to be labeled with the network name
-    on the account feed, not the bulk payment; treating it as one would
-    wrongly auto-ignore a real expense."""
+    A name-fragment match on a BANK account's feed is unambiguously the bulk
+    lump-sum payment: an individual purchase never reaches this account feed
+    carrying a card-network label -- it only ever shows up itemized, via the
+    connected card company (credit_card_charge above) or, for the bank's own
+    card, the itemized-charges feed (force_kind, see bank.sync), never through
+    this classifier. This used to require settlement == 'delayed' as well, on
+    the theory that a same-day match was an individual purchase merely labeled
+    with the network name -- but on the real Hapoalim feed the bulk line's
+    value_date always equals its booking_date (there's no settlement gap to
+    observe at all, despite the real-world cycle settling around the 10th),
+    so that condition only ever produced false negatives and let genuine bulk
+    lines slip past the card_lump_sum dedup as brand new, double-counted
+    expenses."""
     if company_id in CREDIT_CARD_COMPANY_IDS:
         return "credit_card_charge"
 
     haystack = f"{counterparty or ''} {description or ''}".lower()
-    if settlement == "delayed" and any(fragment.lower() in haystack for fragment in CREDIT_CARD_COMPANY_NAME_FRAGMENTS):
+    if any(fragment.lower() in haystack for fragment in CREDIT_CARD_COMPANY_NAME_FRAGMENTS):
         return "credit_card_payment"
 
     return "bank_transfer"

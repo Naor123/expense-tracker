@@ -187,9 +187,21 @@ class ScraperClient:
 
 
 def _map_transaction(t: dict) -> NormalizedTxn:
+    # Hapoalim's own "identifier" is NOT a stable per-transaction id for every
+    # line -- a recurring bank-feed line (e.g. the monthly "מסטרקרד"/"מקס איט
+    # פיננסי" bulk debit) reuses the same small identifier every cycle rather
+    # than minting a new one. Keying storage's UNIQUE(connection_id, external_id)
+    # off the bare identifier alone let the first-ever-synced occurrence of
+    # that line permanently block every later month's occurrence via
+    # INSERT OR IGNORE -- silently, since a blocked insert never even reaches
+    # bank_transactions to show up as "ignored". Folding in the raw date fixes
+    # it: each month's occurrence gets its own date, so they no longer collide.
     identifier = t.get("identifier")
-    if not identifier:
-        identifier = f"{t.get('date')}-{t.get('chargedAmount')}-{t.get('description')}"
+    date_field = t.get("date")
+    if identifier:
+        identifier = f"{identifier}-{date_field}"
+    else:
+        identifier = f"{date_field}-{t.get('chargedAmount')}-{t.get('description')}"
     return NormalizedTxn(
         external_id=str(identifier),
         booking_date=_local_date(str(t.get("date", ""))),
